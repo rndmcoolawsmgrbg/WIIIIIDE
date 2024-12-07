@@ -1,8 +1,6 @@
 # WIIIIIDE (W5XDE)
 
-<video width="320" height="240" controls>
-  <source src="assets/demo.mp4" type="video/mp4">
-</video>
+![](assets/demo.mp4)
 
 Drawing inspiration from cryptocurrency mining pools, W5XDE lets you train deep learning models across multiple nodes with ease. WIIIIIDE is designed to be simple to use, yet powerful enough to handle your training needs.
 
