@@ -1,0 +1,4 @@
+__pycache__/*
+test.py
+trained_model.pth
+dataset.txt
