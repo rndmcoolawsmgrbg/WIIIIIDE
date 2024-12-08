@@ -1,124 +1,80 @@
 # Optimizations and Performance Improvements
 
-This document outlines the key optimizations made to the WIIIIIDE distributed training system and their impacts.
+## Latest Performance Breakthroughs
 
-## Network Optimizations
+### Logging Optimization
+```python
+# Reduced logging overhead by implementing three modes
+if log_mode == "1":  # Silent (default)
+    logging.getLogger('w5xde').setLevel(logging.ERROR)
+elif log_mode == "2":  # Normal
+    logging.getLogger('w5xde').setLevel(logging.WARNING)
+else:  # Verbose
+    logging.getLogger('w5xde').setLevel(logging.INFO)
+```
+**Impact:**
+- Silent mode: 2.07MB/s throughput (24% increase)
+- 17,126 batches/30s (25% increase)
+- Minimal memory overhead (770MB vs 754MB)
+- Network time reduced from ~14s to ~11s per node
 
-### Socket Configuration
+### Socket Buffer Optimization
 ```python
 def configure_socket(sock):
-    # Enable TCP_NODELAY for faster small messages
+    # Increased buffer sizes to 4MB
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+    
+    # TCP optimizations
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    
-    # Increase buffer sizes to 1MB
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
-    
-    # Enable TCP keepalive
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
 ```
 **Impact:**
-- Reduced latency for small messages
-- Better handling of high-throughput data transfers
-- More stable connections under load
-- 41% reduction in network operation time
+- 4x larger buffer size
+- ~15% reduction in network operation time
+- More consistent throughput across nodes
 
-### Optimized Message Sending
-```python
-# Send length and data in a single call
-header = struct.pack(">I", msg_len)
-try:
-    sock.sendall(header + compressed_msg)  # Single syscall
-except BlockingIOError:
-    sock.sendall(header)
-    sock.sendall(compressed_msg)  # Fallback
-```
-**Impact:**
-- Reduced number of system calls
-- Better network throughput (5.3x improvement)
-- More efficient buffer usage
-
-## Data Handling Optimizations
-
-### Pre-allocated Buffers
+### Chunk Size Optimization
 ```python
 def recvall(sock, n):
-    data = bytearray(n)  # Pre-allocate buffer
-    view = memoryview(data)  # Zero-copy view
-    pos = 0
-    
+    chunk_size = min(64 * 1024, n)  # 64KB chunks
     while pos < n:
-        received = sock.recv_into(view[pos:])
-        if not received:
-            return None
-        pos += received
-    
-    return bytes(data)
+        received = sock.recv_into(view[pos:pos + chunk_size])
 ```
 **Impact:**
-- Reduced memory allocations
-- Zero-copy operations where possible
-- Better memory usage (only 6.5% increase for 5x throughput)
+- Better memory utilization
+- More efficient network reads
+- Reduced system calls
 
-### Adaptive Compression
-```python
-if isinstance(msg, dict) and 'gradients' in msg:
-    # Fast compression for gradients
-    compressed_msg = zlib.compress(msg_bytes, level=1)
-else:
-    # Best compression for model architecture
-    compressed_msg = zlib.compress(msg_bytes, level=9)
-```
-**Impact:**
-- Optimized compression strategy based on data type
-- Better balance between compression ratio and speed
-- Compression ratio of 1.88x with faster processing
+## Performance Metrics Evolution
 
-### Pickle Protocol Optimization
-```python
-msg_bytes = pickle.dumps(msg, protocol=5)
-```
-**Impact:**
-- Faster serialization of Python objects
-- Better handling of large data structures
-- Reduced CPU overhead
+### Initial Implementation
+- Throughput: 1.67MB/s
+- Batches: ~13,600/30s
+- Network time: ~14s per node
+- Memory: 755MB
 
-## Overall System Improvements
+### Current Implementation
+- Throughput: 2.07MB/s (+24%)
+- Batches: ~17,100/30s (+25%)
+- Network time: ~11s per node (-21%)
+- Memory: 770MB (+2%)
 
-### Performance Metrics
-- Total batch processing: 5x improvement
-  - Old: 2,733 batches/30s
-  - New: 13,876 batches/30s
+### Per-Node Performance
+- Average throughput: ~212KB/s per node
+- Compression ratio: 1.88x consistent
+- Network time: 11-12s average
+- Compression time: 3-4s average
 
-- Network Throughput: 5.3x improvement
-  - Old: 326KB/s total
-  - New: 1.72MB/s total
-
-- Training Progress: 5x improvement
-  - Old: 86 epochs/30s
-  - New: 434 epochs/30s
-
-### Resource Utilization
-- Memory Efficiency:
-  - Only 6.5% increase in memory usage despite 5x throughput
-  - Old: 709.11MB
-  - New: 755.18MB
-
-- Network Efficiency:
-  - Network time reduced from ~24s to ~14s per node
-  - More even distribution of work across nodes
-  - Better scaling with number of nodes
-
-### Training Stability
-- Maintained consistent loss metrics
-  - Old average loss: 2.3347
-  - New average loss: 2.3339
-- Even distribution of batches across nodes
-- Stable performance across different node counts
+## System Stability Improvements
+- Even distribution of batches (1,458-2,008 per node)
+- Consistent compression ratios
+- Stable memory usage
+- Reliable network performance
 
 ## Future Optimization Opportunities
-1. Implement gradient compression techniques
-2. Add support for asynchronous gradient updates
-3. Explore better serialization alternatives
-4. Implement adaptive batch sizing
-5. Add support for gradient accumulation 
+1. Parallel compression/decompression
+2. Adaptive chunk sizing
+3. Dynamic buffer size adjustment
+4. Network condition-based optimizations
+5. Load balancing improvements
