@@ -12,17 +12,74 @@ import logging
 import socket
 import select
 import sys
+import numpy as np
+import torch
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+TORCH_TO_NUMPY_DTYPE = {
+    'torch.float32': 'float32',
+    'torch.float64': 'float64',
+    'torch.float16': 'float16',
+    'torch.int64': 'int64',
+    'torch.int32': 'int32',
+    'torch.int16': 'int16',
+    'torch.uint8': 'uint8',
+    'torch.int8': 'int8',
+    'torch.bool': 'bool',
+    'torch.complex64': 'complex64',
+    'torch.complex128': 'complex128',
+    'torch.bfloat16': 'float32',  # bfloat16 doesn't exist in numpy, convert to float32
+}
 
 def send_msg(sock, msg, collect_metrics=False):
     """Highly optimized message sending."""
     if collect_metrics:
         start_comp = time.time()
     
-    # Use pickle protocol 5 with out-of-band buffer optimization
-    msg_bytes = pickle.dumps(msg, protocol=5, buffer_callback=lambda x: x)
+    # Optimize serialization based on message type
+    if isinstance(msg, dict):
+        # Handle torch/numpy data specially
+        serialized_data = {}
+        for key, value in msg.items():
+            if isinstance(value, torch.Tensor):
+                # Handle special tensor types and ensure contiguous memory
+                value = value.detach().contiguous()
+                if value.dtype == torch.bfloat16:
+                    value = value.float()
+                
+                serialized_data[key] = {
+                    'type': 'torch_tensor',
+                    'data': value.cpu().numpy().tobytes(),
+                    'shape': value.shape,
+                    'dtype': str(value.dtype),
+                    'requires_grad': value.requires_grad
+                }
+            elif isinstance(value, np.ndarray):
+                # Ensure array is contiguous
+                if not value.flags.c_contiguous:
+                    value = np.ascontiguousarray(value)
+                
+                serialized_data[key] = {
+                    'type': 'numpy_array',
+                    'data': value.tobytes(),
+                    'shape': value.shape,
+                    'dtype': str(value.dtype)
+                }
+            else:
+                # Fallback to pickle for other types
+                serialized_data[key] = {
+                    'type': 'pickled',
+                    'data': pickle.dumps(value, protocol=5)
+                }
+        
+        # Pickle the structure but not the actual data
+        msg_bytes = pickle.dumps(serialized_data, protocol=5)
+    else:
+        # Fallback for non-dict messages
+        msg_bytes = pickle.dumps(msg, protocol=5)
+    
     original_size = len(msg_bytes) if collect_metrics else 0
     
     # Optimize compression strategy with LZ4 block mode
@@ -116,7 +173,39 @@ def recv_msg(sock, collect_metrics=False):
     else:
         msg_bytes = msg_data
     
-    msg = pickle.loads(msg_bytes)
+    # Deserialize with special handling for torch/numpy data
+    data = pickle.loads(msg_bytes)
+    
+    if isinstance(data, dict):
+        # Check if this is our special serialized format
+        if all(isinstance(v, dict) and 'type' in v for v in data.values()):
+            deserialized_data = {}
+            for key, value in data.items():
+                try:
+                    if value['type'] == 'torch_tensor':
+                        numpy_dtype = TORCH_TO_NUMPY_DTYPE.get(value['dtype'], 'float32')
+                        array = np.frombuffer(value['data'], dtype=numpy_dtype).copy()
+                        array = array.reshape(value['shape'])
+                        tensor = torch.from_numpy(array)
+                        
+                        # Restore requires_grad if needed
+                        if value.get('requires_grad', False):
+                            tensor.requires_grad_(True)
+                            
+                        deserialized_data[key] = tensor
+                    elif value['type'] == 'numpy_array':
+                        array = np.frombuffer(value['data'], dtype=np.dtype(value['dtype'])).copy()
+                        deserialized_data[key] = array.reshape(value['shape'])
+                    else:  # 'pickled'
+                        deserialized_data[key] = pickle.loads(value['data'])
+                except Exception as e:
+                    logger.warning(f"Error deserializing key {key}: {e}. Using pickle fallback.")
+                    deserialized_data[key] = pickle.loads(value['data'])
+            msg = deserialized_data
+        else:
+            msg = data
+    else:
+        msg = data
     
     if collect_metrics:
         comp_time = time.time() - start_comp

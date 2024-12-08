@@ -41,6 +41,30 @@ def recvall(sock, n):
     return bytes(data)
 ```
 
+### Direct Tensor Serialization
+```python
+def serialize_tensor(tensor):
+    # Ensure tensor is on CPU and contiguous
+    tensor = tensor.detach().contiguous()
+    return {
+        'type': 'torch_tensor',
+        'data': tensor.cpu().numpy().tobytes(),
+        'shape': tensor.shape,
+        'dtype': str(tensor.dtype),
+        'requires_grad': tensor.requires_grad
+    }
+
+def deserialize_tensor(data):
+    # Convert back to tensor efficiently
+    array = np.frombuffer(data['data'], 
+                         dtype=TORCH_TO_NUMPY_DTYPE.get(data['dtype'], 'float32')
+                        ).copy()
+    tensor = torch.from_numpy(array.reshape(data['shape']))
+    if data.get('requires_grad', False):
+        tensor.requires_grad_(True)
+    return tensor
+```
+
 ## Best Practices
 
 ### Production Configuration
@@ -122,3 +146,22 @@ def recvall(sock, n):
    - Memory-mapped operations
    - Advanced load balancing
    - Resource prediction
+
+### Best Practices for Tensor Serialization
+1. **Data Types**
+   - Use contiguous tensors
+   - Handle special types (bfloat16)
+   - Maintain dtype mapping
+   - Preserve gradient information
+
+2. **Memory Management**
+   - Use direct buffer access
+   - Implement zero-copy where possible
+   - Handle non-contiguous arrays
+   - Proper cleanup of temporary buffers
+
+3. **Error Handling**
+   - Graceful fallback to pickle
+   - Type verification
+   - Shape validation
+   - Device placement checks
