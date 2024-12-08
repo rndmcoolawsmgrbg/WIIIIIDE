@@ -15,7 +15,8 @@ The `CentralServer` class is the central hub for all training data. It's respons
 - `batch_size` The size of the batches to distribute. Default is 16.
 - `ip` The IP address to bind the server to. Default is "localhost". ("0.0.0.0" for all interfaces)
 - `port` The port to bind the server to. Default is 5555.
-- `secure` Whether or not to use encryption. Default is False. Encryption drastically slows down training, so only use it if you need to. (like, really need to)
+- `secure` Whether or not to use encryption. Default is False.
+- `checkpoint_interval` How often to save checkpoints. Default is 5.
   
 #### Methods
 - `start()` Starts the server. This is a blocking call, so it will not return until the server is stopped. 
@@ -28,8 +29,10 @@ The `TrainingNode` class is the client that connects to the `CentralServer` to r
 
 - `model` The model to train. Must be a PyTorch model class.
 - `server_address` A tuple of (ip, port) for the server connection. Default is ('localhost', 5555).
-- `secure` Whether or not to use encryption. Default is False. Encryption drastically slows down the submission of gradients, so only use it if you need to. (like, really need to)
+- `secure` Whether or not to use encryption. Default is False.
+- `collect_metrics` Whether to collect network and compression metrics. Default is False.
 
 #### Methods
-- `train(loss_callback=None)` Starts training the model. This is a blocking call, so it will not return until training is complete.
-  - `loss_callback`: Optional callback function that receives (loss_value, batch_id) for tracking training progress.
+- `train(loss_callback=None, network_callback=None)` Starts training the model.
+  - `loss_callback`: Optional callback function that receives (loss_value, batch_id)
+  - `network_callback`: Optional callback function that receives network metrics (sent_bytes, received_bytes, comp_time, net_time, orig_size, comp_size)

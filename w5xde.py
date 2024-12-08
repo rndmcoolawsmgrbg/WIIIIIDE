@@ -21,23 +21,69 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def send_msg(sock, msg):
-    msg = pickle.dumps(msg)
-    msg = zlib.compress(msg)
-    msg_len = len(msg)
+def send_msg(sock, msg, collect_metrics=False):
+    """Simple message sending with optional metrics collection."""
+    if collect_metrics:
+        start_comp = time.time()
+    
+    msg_bytes = pickle.dumps(msg)
+    original_size = len(msg_bytes) if collect_metrics else 0
+    compressed_msg = zlib.compress(msg_bytes)
+    compressed_size = len(compressed_msg) if collect_metrics else 0
+    
+    if collect_metrics:
+        comp_time = time.time() - start_comp
+        start_net = time.time()
+    
+    msg_len = len(compressed_msg)
     sock.sendall(struct.pack(">I", msg_len))
-    sock.sendall(msg)
+    sock.sendall(compressed_msg)
+    
+    if collect_metrics:
+        net_time = time.time() - start_net
+        return {
+            'sent_bytes': msg_len + 4,
+            'received_bytes': 0,
+            'comp_time': comp_time,
+            'net_time': net_time,
+            'original_size': original_size,
+            'compressed_size': compressed_size
+        }
+    return None
 
-def recv_msg(sock):
+def recv_msg(sock, collect_metrics=False):
+    """Simple message receiving with optional metrics collection."""
+    if collect_metrics:
+        start_net = time.time()
+    
     raw_msglen = recvall(sock, 4)
     if not raw_msglen:
-        return None
+        return (None, None) if collect_metrics else None
+        
     msglen = struct.unpack('>I', raw_msglen)[0]
-    msg = recvall(sock, msglen)
-    if msg is None:
-        return None
-    msg = zlib.decompress(msg)
-    return pickle.loads(msg)
+    compressed_msg = recvall(sock, msglen)
+    if compressed_msg is None:
+        return (None, None) if collect_metrics else None
+    
+    if collect_metrics:
+        net_time = time.time() - start_net
+        start_comp = time.time()
+    
+    msg_bytes = zlib.decompress(compressed_msg)
+    msg = pickle.loads(msg_bytes)
+    
+    if collect_metrics:
+        comp_time = time.time() - start_comp
+        metrics = {
+            'sent_bytes': 0,
+            'received_bytes': msglen + 4,
+            'comp_time': comp_time,
+            'net_time': net_time,
+            'original_size': len(msg_bytes),
+            'compressed_size': msglen
+        }
+        return msg, metrics
+    return msg
 
 def generate_key():
     return base64.urlsafe_b64encode(os.urandom(32))
@@ -66,31 +112,65 @@ class SecureConnection:
             encrypted_msg = bytes(encrypted_msg)
         return self.fernet.decrypt(encrypted_msg)
 
-def secure_send_msg(sock, msg, secure_conn):
+def secure_send_msg(sock, msg, secure_conn, collect_metrics=False):
     try:
+        start_comp = time.time()
         pickled_msg = pickle.dumps(msg)
+        original_size = len(pickled_msg)
         compressed_msg = zlib.compress(pickled_msg)
+        compressed_size = len(compressed_msg)
         encrypted_msg = secure_conn.encrypt_message(compressed_msg)
+        comp_time = time.time() - start_comp
+        
+        start_net = time.time()
         msg_len = len(encrypted_msg)
         sock.sendall(struct.pack(">I", msg_len))
         sock.sendall(encrypted_msg)
+        net_time = time.time() - start_net
+        
+        if collect_metrics:
+            return {
+                'sent_bytes': msg_len + 4,  # Include length header
+                'received_bytes': 0,
+                'comp_time': comp_time,
+                'net_time': net_time,
+                'original_size': original_size,
+                'compressed_size': compressed_size
+            }
+        return None
         
     except Exception as e:
         logger.error(f"Error in secure_send_msg: {e}")
         raise
 
-def secure_recv_msg(sock, secure_conn):
+def secure_recv_msg(sock, secure_conn, collect_metrics=False):
     try:
+        start_net = time.time()
         raw_msglen = recvall(sock, 4)
         if not raw_msglen:
-            return None
+            return None, None
         msglen = struct.unpack('>I', raw_msglen)[0]
         encrypted_msg = recvall(sock, msglen)
         if encrypted_msg is None:
-            return None
+            return None, None
+        net_time = time.time() - start_net
+        
+        start_comp = time.time()
         decrypted_msg = secure_conn.decrypt_message(encrypted_msg)
-        decompressed_msg = zlib.decompress(decrypted_msg)
-        return pickle.loads(decompressed_msg)
+        msg_bytes = zlib.decompress(decrypted_msg)
+        msg = pickle.loads(msg_bytes)
+        comp_time = time.time() - start_comp
+        
+        metrics = {
+            'sent_bytes': 0,
+            'received_bytes': msglen + 4,  # Include length header
+            'comp_time': comp_time,
+            'net_time': net_time,
+            'original_size': len(msg_bytes),
+            'compressed_size': msglen
+        }
+        
+        return msg, metrics
         
     except Exception as e:
         logger.error(f"Error in secure_recv_msg: {e}")
@@ -213,16 +293,19 @@ class CentralServer:
                     batch = self.batch_queue.get()
                     logger.info(f"Sending batch {batch['batch_id']} to node {addr}")
                     
+                    # Send batch without collecting metrics on server side
                     if self.secure:
-                        secure_send_msg(conn, batch, secure_conn)
+                        secure_send_msg(conn, batch, secure_conn, False)
                     else:
-                        send_msg(conn, batch)
+                        send_msg(conn, batch, False)
                     
                     logger.info(f"Waiting for gradients from node {addr}")
+                    
+                    # Receive gradients without collecting metrics
                     if self.secure:
-                        gradients_data = secure_recv_msg(conn, secure_conn)
+                        gradients_data = secure_recv_msg(conn, secure_conn, False)
                     else:
-                        gradients_data = recv_msg(conn)
+                        gradients_data = recv_msg(conn, False)
                         
                     if gradients_data is None:
                         logger.warning(f"Received None gradients from {addr}")
@@ -268,16 +351,24 @@ class CentralServer:
             server.close()
 
 class TrainingNode:
-    def __init__(self, model, server_address=('localhost', 5555), secure=False):
+    def __init__(self, model, server_address=('localhost', 5555), secure=False, collect_metrics=False):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
         self.server_address = server_address
         self.optimizer = torch.optim.Adam(model.parameters())
         self.running = True
         self.secure = secure
+        self.collect_metrics = collect_metrics
         logger.info(f"Using device: {self.device}")
     
-    def train(self, loss_callback=None):
+    def train(self, loss_callback=None, network_callback=None):
+        """
+        Train the model.
+        
+        Args:
+            loss_callback: Optional callback for loss tracking
+            network_callback: Optional callback for network metrics
+        """
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         logger.info(f"Connecting to server at {self.server_address}")
         sock.connect(self.server_address)
@@ -285,20 +376,26 @@ class TrainingNode:
         try:
             if self.secure:
                 secure_conn = perform_handshake(sock, is_server=False)
-                logger.info("Completed handshake with server")
             
             while self.running:
-                logger.info("Waiting for batch from server...")
+                # Receive batch
                 if self.secure:
-                    batch = secure_recv_msg(sock, secure_conn)
+                    result = secure_recv_msg(sock, secure_conn, self.collect_metrics)
                 else:
-                    batch = recv_msg(sock)
+                    result = recv_msg(sock, self.collect_metrics)
+                
+                if self.collect_metrics:
+                    batch, recv_metrics = result
+                else:
+                    batch = result
+                    recv_metrics = None
+                
                 if batch is None:
-                    logger.warning("Received None batch")
                     break
 
                 logger.info(f"Received batch {batch['batch_id']}")
 
+                # Process batch and compute gradients
                 input_ids = batch['input_ids'].to(self.device)
                 attention_mask = batch['attention_mask'].to(self.device) if batch.get('attention_mask') is not None else None
                 labels = batch['labels'].to(self.device) if batch.get('labels') is not None else None
@@ -313,11 +410,10 @@ class TrainingNode:
                 
                 loss.backward()
                 
-                # Report loss if callback is provided
                 if loss_callback:
                     loss_callback(loss.item(), batch['batch_id'])
                 
-                # Convert gradients to a serializable format
+                # Send gradients
                 gradients_data = {
                     'batch_id': batch['batch_id'],
                     'gradients': [
@@ -328,11 +424,22 @@ class TrainingNode:
                 
                 logger.info(f"Sending gradients for batch {batch['batch_id']}")
                 if self.secure:
-                    secure_send_msg(sock, gradients_data, secure_conn)
+                    send_metrics = secure_send_msg(sock, gradients_data, secure_conn, self.collect_metrics)
                 else:
-                    send_msg(sock, gradients_data)
+                    send_metrics = send_msg(sock, gradients_data, self.collect_metrics)
                 
                 logger.info(f"Training loss: {loss.item():.4f}")
+                
+                # Report network metrics if enabled and callbacks provided
+                if self.collect_metrics and network_callback and recv_metrics and send_metrics:
+                    network_callback(
+                        send_metrics['sent_bytes'],
+                        recv_metrics['received_bytes'],
+                        recv_metrics['comp_time'] + send_metrics['comp_time'],
+                        recv_metrics['net_time'] + send_metrics['net_time'],
+                        recv_metrics['original_size'] + send_metrics['original_size'],
+                        recv_metrics['compressed_size'] + send_metrics['compressed_size']
+                    )
                 
         except Exception as e:
             logger.error(f"Error in training node: {e}", exc_info=True)
