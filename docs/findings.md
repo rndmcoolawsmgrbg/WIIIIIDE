@@ -1,79 +1,104 @@
 # Performance Analysis and Findings
 
-## Performance Analysis Across Different Configurations
+## Latest Performance Analysis
 
-### Standard Configuration (Best Performance)
-- Total batches: 13,764 in 30s (~459 batches/s)
-- Network throughput: 1.67MB/s
-- Network time: ~14s per node
-- Memory usage: 755.39MB
-- Default compression ratio: 1.88x (pickle/zlib)
-- Even distribution: 1,196-1,617 batches per node
+### Silent Mode (Best Performance)
+- Total batches: 17,126 in 30s (~571 batches/s)
+- Network throughput: 2.07MB/s
+- Network time: ~11s per node
+- Memory usage: 770.45MB
+- Default compression ratio: 1.88x
+- Distribution: 1,458-2,008 batches per node
 
-### With Additional Compression
-- Total batches: 10,339 in 30s (~344 batches/s)
-- Network throughput: 834.88KB/s
-- Network time: ~12.7s per node
-- Memory usage: 804.97MB
-- Compression ratio: 2.02x
-- Higher overhead, lower throughput
+### Impact of Logging Modes
+1. **Silent Mode (Default)**
+   - Maximum throughput: 2.07MB/s
+   - Minimal overhead
+   - Best for production
 
-## Key Findings
+2. **Normal Mode**
+   - Throughput: ~1.85MB/s
+   - Basic progress visibility
+   - Moderate overhead
 
-1. **Network Performance**
-   - Default configuration achieves optimal throughput
-   - Additional compression reduces overall performance
-   - Network operations well-balanced across nodes
-   - Consistent performance across multiple runs
+3. **Verbose Mode**
+   - Throughput: ~1.67MB/s
+   - Full debugging capability
+   - ~24% performance impact
 
-2. **Resource Utilization**
-   - Memory usage is stable (~755MB)
-   - CPU overhead is minimized
-   - Good load balancing across nodes
-   - Efficient socket buffer usage
+## Critical Findings
 
-3. **Training Stability**
-   - Consistent loss metrics (avg ~2.33)
-   - Even batch distribution
-   - Reliable convergence patterns
-   - Scalable with number of nodes
+1. **Logging Impact**
+   - Logging overhead was more significant than expected
+   - 24% performance improvement by optimizing logging
+   - Minimal memory impact from logging changes
 
-4. **Compression Analysis**
-   - Default pickle/zlib combination is optimal
-   - Custom compression attempts reduced performance
-   - Compression ratio gains don't justify overhead
-   - Network isn't the primary bottleneck
+2. **Network Optimization**
+   - Increased buffer sizes highly effective
+   - TCP_QUICKACK improved acknowledgment speed
+   - 64KB chunk size optimal for current workload
+   - Network time reduced by 21%
 
-## Conclusions
+3. **Resource Utilization**
+   - Memory usage stable across modes
+   - CPU usage more efficient
+   - Better load distribution
+   - Compression time consistent
 
-1. **Optimal Configuration**
-   - Use default configuration without additional compression
-   - Maintain current socket optimization settings
-   - Keep existing buffer management system
-   - Rely on built-in Python serialization
+4. **Scaling Characteristics**
+   - Linear scaling with nodes
+   - Consistent per-node performance
+   - Even workload distribution
+   - Reliable compression ratios
 
-2. **Performance Characteristics**
-   - System scales well with multiple nodes
-   - Network overhead is well-managed
-   - Memory footprint is stable
-   - Processing is efficiently distributed
+## Performance Bottlenecks
 
-3. **Future Optimization Opportunities**
-   - Focus on gradient accumulation strategies
-   - Explore asynchronous updates
-   - Consider adaptive batch sizing
-   - Investigate model-specific optimizations
+1. **Network Operations**
+   - Network time: ~11s per node
+   - Main bottleneck shifted to actual data transfer
+   - Buffer sizes now optimal
+
+2. **Compression Operations**
+   - Compression time: 3-4s per node
+   - Consistent ratio of 1.88x
+   - Good balance of speed vs compression
+
+3. **System Resources**
+   - Memory usage stable at ~770MB
+   - Minimal garbage collection impact
+   - Efficient buffer utilization
 
 ## Best Practices
 
-1. **Configuration**
-   - Use default compression settings
-   - Enable socket optimizations
-   - Maintain appropriate batch sizes
-   - Monitor node distribution
+1. **Production Deployment**
+   - Use silent mode by default
+   - Monitor per-node metrics
+   - 4MB buffer sizes
+   - 64KB chunk sizes
 
-2. **Deployment**
-   - Ensure adequate network capacity
-   - Monitor memory usage
-   - Track per-node metrics
-   - Regular performance benchmarking 
+2. **Development/Testing**
+   - Use normal mode for basic monitoring
+   - Reserve verbose mode for debugging
+   - Regular performance benchmarking
+
+3. **Resource Planning**
+   - Account for ~80MB per node
+   - Network capacity for ~250KB/s per node
+   - Buffer size requirements
+
+## Future Research Areas
+
+1. **Dynamic Optimization**
+   - Adaptive buffer sizing
+   - Network condition-based tuning
+   - Workload-based compression levels
+
+2. **Resource Management**
+   - Better compression time management
+   - Dynamic node allocation
+   - Adaptive batch sizing
+
+3. **Monitoring Improvements**
+   - Real-time performance metrics
+   - Automated bottleneck detection
+   - Resource usage predictions 
