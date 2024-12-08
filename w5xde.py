@@ -16,23 +16,35 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
 import os
+import select
+import errno
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def send_msg(sock, msg, collect_metrics=False):
-    """Optimized message sending with batch compression."""
+    """Highly optimized message sending."""
     if collect_metrics:
         start_comp = time.time()
     
-    msg_bytes = pickle.dumps(msg, protocol=5)
+    # Use pickle protocol 5 with out-of-band buffer optimization
+    msg_bytes = pickle.dumps(msg, protocol=5, buffer_callback=lambda x: x)
     original_size = len(msg_bytes) if collect_metrics else 0
     
+    # Use different compression strategies based on data type and size
     if isinstance(msg, dict) and 'gradients' in msg:
-        compressed_msg = zlib.compress(msg_bytes, level=1)
+        if len(msg_bytes) > 1024 * 1024:  # 1MB
+            # For large gradients, use fast compression
+            compressed_msg = zlib.compress(msg_bytes, level=1)
+            is_compressed = True
+        else:
+            # For smaller gradients, skip compression
+            compressed_msg = msg_bytes
+            is_compressed = False
     else:
         compressed_msg = zlib.compress(msg_bytes, level=9)
+        is_compressed = True
     
     compressed_size = len(compressed_msg) if collect_metrics else 0
     
@@ -40,21 +52,23 @@ def send_msg(sock, msg, collect_metrics=False):
         comp_time = time.time() - start_comp
         start_net = time.time()
     
+    # Send compression flag first
+    flag = struct.pack("?", is_compressed)
     msg_len = len(compressed_msg)
     header = struct.pack(">I", msg_len)
     
     try:
-        chunks = [header, compressed_msg]
-        for chunk in chunks:
-            sock.sendall(chunk)
+        # Send flag, length and data
+        sock.sendall(flag + header + compressed_msg)
     except BlockingIOError:
+        sock.sendall(flag)
         sock.sendall(header)
         sock.sendall(compressed_msg)
     
     if collect_metrics:
         net_time = time.time() - start_net
         return {
-            'sent_bytes': msg_len + 4,
+            'sent_bytes': msg_len + 5,  # +5 for header and flag
             'received_bytes': 0,
             'comp_time': comp_time,
             'net_time': net_time,
@@ -64,9 +78,15 @@ def send_msg(sock, msg, collect_metrics=False):
     return None
 
 def recv_msg(sock, collect_metrics=False):
-    """Optimized message receiving."""
+    """High-performance data receiving."""
     if collect_metrics:
         start_net = time.time()
+    
+    # Receive compression flag
+    flag_bytes = recvall(sock, 1)
+    if not flag_bytes:
+        return (None, None) if collect_metrics else None
+    is_compressed = struct.unpack("?", flag_bytes)[0]
     
     # Receive length
     raw_msglen = recvall(sock, 4)
@@ -76,23 +96,27 @@ def recv_msg(sock, collect_metrics=False):
     msglen = struct.unpack('>I', raw_msglen)[0]
     
     # Receive data
-    compressed_msg = recvall(sock, msglen)
-    if compressed_msg is None:
+    msg_data = recvall(sock, msglen)
+    if msg_data is None:
         return (None, None) if collect_metrics else None
     
     if collect_metrics:
         net_time = time.time() - start_net
         start_comp = time.time()
     
-    # Decompress and unpickle
-    msg_bytes = zlib.decompress(compressed_msg)
+    # Decompress if necessary
+    if is_compressed:
+        msg_bytes = zlib.decompress(msg_data)
+    else:
+        msg_bytes = msg_data
+    
     msg = pickle.loads(msg_bytes)
     
     if collect_metrics:
         comp_time = time.time() - start_comp
         metrics = {
             'sent_bytes': 0,
-            'received_bytes': msglen + 4,
+            'received_bytes': msglen + 5,  # +5 for header and flag
             'comp_time': comp_time,
             'net_time': net_time,
             'original_size': len(msg_bytes),
@@ -245,41 +269,110 @@ def perform_handshake(sock, is_server=True):
         raise
 
 def recvall(sock, n):
-    """Optimized data receiving with larger chunks."""
-    # Pre-allocate buffer with optimal chunk size
+    """High-performance data receiving."""
     data = bytearray(n)
     view = memoryview(data)
     pos = 0
     
-    # Use larger chunk sizes for better throughput
-    chunk_size = min(64 * 1024, n)  # 64KB chunks
+    # Use 256KB chunks for better throughput
+    chunk_size = min(256 * 1024, n)
     
     while pos < n:
-        # Receive directly into pre-allocated buffer
-        received = sock.recv_into(view[pos:pos + chunk_size])
-        if not received:
-            return None
-        pos += received
+        try:
+            while True:
+                try:
+                    received = sock.recv_into(view[pos:pos + chunk_size])
+                    if not received:
+                        return None
+                    pos += received
+                    break
+                except BlockingIOError:
+                    select.select([sock], [], [])
+                    continue
+                except socket.error as e:
+                    if e.errno != errno.EAGAIN:
+                        raise
+                    select.select([sock], [], [])
+        except Exception as e:
+            logger.error(f"Receive error: {e}")
+            raise
     
     return bytes(data)
 
 def configure_socket(sock):
     """Configure socket for maximum throughput."""
-    # Increase buffer sizes to 4MB based on findings that larger buffers helped
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+    # Increase buffer sizes to 8MB for higher throughput
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8 * 1024 * 1024)
     
-    # Enable TCP_NODELAY for faster small messages
+    # Enable TCP_NODELAY and TCP_QUICKACK
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    
-    # Add TCP_QUICKACK for faster acknowledgments
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
-    
-    # Enable TCP keepalive
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
     
     # Set TCP_FASTOPEN for faster connection establishment
     sock.setsockopt(socket.SOL_TCP, socket.TCP_FASTOPEN, 1)
+    
+    # Enable TCP window scaling
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+class BatchQueue:
+    """Optimized batch queue with prefetching."""
+    def __init__(self, maxsize=1000):
+        self.queue = queue.Queue(maxsize=maxsize)
+        self.prefetch_queue = queue.Queue(maxsize=maxsize)
+        self.running = True
+        self.prefetch_thread = threading.Thread(target=self._prefetch_worker, daemon=True)
+        self.prefetch_thread.start()
+    
+    def _prefetch_worker(self):
+        while self.running:
+            try:
+                batch = self.queue.get(timeout=0.1)
+                self.prefetch_queue.put(batch)
+            except queue.Empty:
+                continue
+    
+    def put(self, batch):
+        self.queue.put(batch)
+    
+    def get(self):
+        try:
+            return self.prefetch_queue.get_nowait()
+        except queue.Empty:
+            return self.queue.get()
+    
+    def empty(self):
+        return self.queue.empty() and self.prefetch_queue.empty()
+    
+    def qsize(self):
+        return self.queue.qsize() + self.prefetch_queue.qsize()
+
+def connect_with_retry(sock, server_address, timeout=30):
+    """Connect with retry for non-blocking sockets."""
+    sock.setblocking(False)
+    try:
+        sock.connect(server_address)
+    except BlockingIOError:
+        pass
+    
+    start_time = time.time()
+    while True:
+        try:
+            sock.getpeername()
+            break  # Connected successfully
+        except socket.error:
+            if time.time() - start_time > timeout:
+                raise TimeoutError("Connection timeout")
+            # Wait for socket to be writable (connected)
+            _, writable, _ = select.select([], [sock], [], 0.1)
+            if writable:
+                err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                if err != 0:
+                    raise socket.error(err)
+                break
+    
+    # Set back to blocking mode after connection
+    sock.setblocking(True)
 
 class CentralServer:
     def __init__(self, model, dataset, batch_size=16, ip="localhost", port=5555,
@@ -290,7 +383,7 @@ class CentralServer:
         self.ip = ip
         self.port = port
         self.nodes = []
-        self.batch_queue = queue.Queue(maxsize=1000)
+        self.batch_queue = BatchQueue(maxsize=1000)  # Use optimized queue
         self.gradient_queue = queue.Queue()
         self.running = True
         self.checkpoint_dir = checkpoint_dir
@@ -298,7 +391,7 @@ class CentralServer:
         self.last_checkpoint = time.time()
         self.global_step = 0
         self.secure = secure
-        self.gradient_compressor = GradientCompression()  # For decompression
+        self.gradient_compressor = GradientCompression()
 
     def distribute_batches(self):
         logger.info("Starting batch distribution...")
@@ -529,9 +622,9 @@ class TrainingNode:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         configure_socket(sock)
         logger.info(f"Connecting to server at {self.server_address}")
-        sock.connect(self.server_address)
         
         try:
+            connect_with_retry(sock, self.server_address)
             if self.secure:
                 secure_conn = perform_handshake(sock, is_server=False)
             
