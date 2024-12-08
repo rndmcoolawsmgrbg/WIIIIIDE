@@ -88,7 +88,7 @@ flowchart TD
 
 We're transparent about where WIIIIIDE is right now:
 
-- **Network Dependency**: Requires a stable, high-bandwidth connection.
-- **Security Considerations**: No built-in encryption yet - best used on secure networks. (We're going to tackle this soon with enough interest!)
+- **Network Dependency**: Requires a stable, high-bandwidth connection. (Especially for the central server)
+- **Security Considerations**: Very minor forms of encryption are in place.
 - **Resource Management**: Recommended to use on dedicated servers.
 - **Performance**: We're continually improving and optimizing.
