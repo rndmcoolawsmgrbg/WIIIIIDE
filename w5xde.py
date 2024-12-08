@@ -22,21 +22,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def send_msg(sock, msg, collect_metrics=False):
-    """Optimized message sending with faster compression."""
+    """Optimized message sending with batch compression."""
     if collect_metrics:
         start_comp = time.time()
     
-    # Use pickle protocol 5 for better performance
     msg_bytes = pickle.dumps(msg, protocol=5)
     original_size = len(msg_bytes) if collect_metrics else 0
     
-    # Use highest compression level for first message (model architecture)
-    # Use fast compression for gradients
     if isinstance(msg, dict) and 'gradients' in msg:
-        # For gradients, use fast compression
         compressed_msg = zlib.compress(msg_bytes, level=1)
     else:
-        # For model architecture, use best compression
         compressed_msg = zlib.compress(msg_bytes, level=9)
     
     compressed_size = len(compressed_msg) if collect_metrics else 0
@@ -45,15 +40,14 @@ def send_msg(sock, msg, collect_metrics=False):
         comp_time = time.time() - start_comp
         start_net = time.time()
     
-    # Send length and data in a single call when possible
     msg_len = len(compressed_msg)
     header = struct.pack(">I", msg_len)
     
     try:
-        # Use sendall with combined buffer for fewer syscalls
-        sock.sendall(header + compressed_msg)
+        chunks = [header, compressed_msg]
+        for chunk in chunks:
+            sock.sendall(chunk)
     except BlockingIOError:
-        # Fall back to separate sends if buffer is full
         sock.sendall(header)
         sock.sendall(compressed_msg)
     
@@ -251,15 +245,18 @@ def perform_handshake(sock, is_server=True):
         raise
 
 def recvall(sock, n):
-    """Optimized data receiving."""
-    # Pre-allocate buffer for better performance
+    """Optimized data receiving with larger chunks."""
+    # Pre-allocate buffer with optimal chunk size
     data = bytearray(n)
     view = memoryview(data)
     pos = 0
     
+    # Use larger chunk sizes for better throughput
+    chunk_size = min(64 * 1024, n)  # 64KB chunks
+    
     while pos < n:
-        # Use the pre-allocated buffer
-        received = sock.recv_into(view[pos:])
+        # Receive directly into pre-allocated buffer
+        received = sock.recv_into(view[pos:pos + chunk_size])
         if not received:
             return None
         pos += received
@@ -267,16 +264,22 @@ def recvall(sock, n):
     return bytes(data)
 
 def configure_socket(sock):
-    """Configure socket for optimal performance."""
+    """Configure socket for maximum throughput."""
+    # Increase buffer sizes to 4MB based on findings that larger buffers helped
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+    
     # Enable TCP_NODELAY for faster small messages
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     
-    # Increase buffer sizes
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+    # Add TCP_QUICKACK for faster acknowledgments
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
     
     # Enable TCP keepalive
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    
+    # Set TCP_FASTOPEN for faster connection establishment
+    sock.setsockopt(socket.SOL_TCP, socket.TCP_FASTOPEN, 1)
 
 class CentralServer:
     def __init__(self, model, dataset, batch_size=16, ip="localhost", port=5555,
@@ -324,39 +327,31 @@ class CentralServer:
                 logger.info(f"Queue size: {self.batch_queue.qsize()}")
                 
     def handle_node(self, conn, addr):
-        logger.info(f"New node connected: {addr}")
+        """Handle node connection with minimal logging."""
         try:
             if self.secure:
                 secure_conn = perform_handshake(conn, is_server=True)
-                logger.info(f"Completed handshake with node {addr}")
             
             while self.running:
                 if not self.batch_queue.empty():
                     batch = self.batch_queue.get()
-                    logger.info(f"Sending batch {batch['batch_id']} to node {addr}")
                     
-                    # Send batch without collecting metrics on server side
                     if self.secure:
                         secure_send_msg(conn, batch, secure_conn, False)
                     else:
                         send_msg(conn, batch, False)
                     
-                    logger.info(f"Waiting for gradients from node {addr}")
-                    
-                    # Receive gradients without collecting metrics
                     if self.secure:
                         gradients_data = secure_recv_msg(conn, secure_conn, False)
                     else:
                         gradients_data = recv_msg(conn, False)
                         
                     if gradients_data is None:
-                        logger.warning(f"Received None gradients from {addr}")
                         break
                     
-                    # Convert received gradients back to tensors
                     if gradients_data.get('compressed', False):
                         gradients = self.gradient_compressor.decompress(
-                            gradients_data['gradients'],  # Now contains compressed bytes
+                            gradients_data['gradients'],
                             gradients_data['scales']
                         )
                     else:
@@ -365,16 +360,13 @@ class CentralServer:
                             for grad in gradients_data['gradients']
                         ]
                     
-                    logger.info(f"Received gradients for batch {gradients_data['batch_id']}")
                     self.gradient_queue.put(gradients)
                 else:
-                    logger.debug("Batch queue is empty, waiting...")
                     time.sleep(0.1)
 
         except Exception as e:
             logger.error(f"Error handling node {addr}: {e}")
         finally:
-            logger.info(f"Node {addr} disconnected")
             conn.close()
 
     def start(self):
