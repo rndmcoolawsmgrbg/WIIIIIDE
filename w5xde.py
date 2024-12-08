@@ -22,22 +22,40 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def send_msg(sock, msg, collect_metrics=False):
-    """Simple message sending with optional metrics collection."""
+    """Optimized message sending with faster compression."""
     if collect_metrics:
         start_comp = time.time()
     
-    msg_bytes = pickle.dumps(msg)
+    # Use pickle protocol 5 for better performance
+    msg_bytes = pickle.dumps(msg, protocol=5)
     original_size = len(msg_bytes) if collect_metrics else 0
-    compressed_msg = zlib.compress(msg_bytes)
+    
+    # Use highest compression level for first message (model architecture)
+    # Use fast compression for gradients
+    if isinstance(msg, dict) and 'gradients' in msg:
+        # For gradients, use fast compression
+        compressed_msg = zlib.compress(msg_bytes, level=1)
+    else:
+        # For model architecture, use best compression
+        compressed_msg = zlib.compress(msg_bytes, level=9)
+    
     compressed_size = len(compressed_msg) if collect_metrics else 0
     
     if collect_metrics:
         comp_time = time.time() - start_comp
         start_net = time.time()
     
+    # Send length and data in a single call when possible
     msg_len = len(compressed_msg)
-    sock.sendall(struct.pack(">I", msg_len))
-    sock.sendall(compressed_msg)
+    header = struct.pack(">I", msg_len)
+    
+    try:
+        # Use sendall with combined buffer for fewer syscalls
+        sock.sendall(header + compressed_msg)
+    except BlockingIOError:
+        # Fall back to separate sends if buffer is full
+        sock.sendall(header)
+        sock.sendall(compressed_msg)
     
     if collect_metrics:
         net_time = time.time() - start_net
@@ -52,15 +70,18 @@ def send_msg(sock, msg, collect_metrics=False):
     return None
 
 def recv_msg(sock, collect_metrics=False):
-    """Simple message receiving with optional metrics collection."""
+    """Optimized message receiving."""
     if collect_metrics:
         start_net = time.time()
     
+    # Receive length
     raw_msglen = recvall(sock, 4)
     if not raw_msglen:
         return (None, None) if collect_metrics else None
-        
+    
     msglen = struct.unpack('>I', raw_msglen)[0]
+    
+    # Receive data
     compressed_msg = recvall(sock, msglen)
     if compressed_msg is None:
         return (None, None) if collect_metrics else None
@@ -69,6 +90,7 @@ def recv_msg(sock, collect_metrics=False):
         net_time = time.time() - start_net
         start_comp = time.time()
     
+    # Decompress and unpickle
     msg_bytes = zlib.decompress(compressed_msg)
     msg = pickle.loads(msg_bytes)
     
@@ -229,13 +251,32 @@ def perform_handshake(sock, is_server=True):
         raise
 
 def recvall(sock, n):
-    data = bytearray()
-    while len(data) < n:
-        packet = sock.recv(n - len(data))
-        if not packet:
+    """Optimized data receiving."""
+    # Pre-allocate buffer for better performance
+    data = bytearray(n)
+    view = memoryview(data)
+    pos = 0
+    
+    while pos < n:
+        # Use the pre-allocated buffer
+        received = sock.recv_into(view[pos:])
+        if not received:
             return None
-        data.extend(packet)
+        pos += received
+    
     return bytes(data)
+
+def configure_socket(sock):
+    """Configure socket for optimal performance."""
+    # Enable TCP_NODELAY for faster small messages
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    
+    # Increase buffer sizes
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+    
+    # Enable TCP keepalive
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
 class CentralServer:
     def __init__(self, model, dataset, batch_size=16, ip="localhost", port=5555,
@@ -332,6 +373,7 @@ class CentralServer:
     def start(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        configure_socket(server)
         server.bind((self.ip, self.port))
         server.listen(5)
         
@@ -370,6 +412,7 @@ class TrainingNode:
             network_callback: Optional callback for network metrics
         """
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        configure_socket(sock)
         logger.info(f"Connecting to server at {self.server_address}")
         sock.connect(self.server_address)
         
