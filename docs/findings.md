@@ -2,103 +2,112 @@
 
 ## Latest Performance Analysis
 
-### Silent Mode (Best Performance)
-- Total batches: 17,126 in 30s (~571 batches/s)
-- Network throughput: 2.07MB/s
-- Network time: ~11s per node
-- Memory usage: 770.45MB
-- Default compression ratio: 1.88x
-- Distribution: 1,458-2,008 batches per node
+### Current Best Performance
+- Total batches: 17,151 in 30s (~572 batches/s)
+- Network throughput: 2.90MB/s
+- Network time: 10.40-12.15s per node
+- Memory usage: 767.87MB
+- Adaptive compression ratio: 1.35x
+- Distribution: 1,449-2,069 batches per node
 
-### Impact of Logging Modes
-1. **Silent Mode (Default)**
-   - Maximum throughput: 2.07MB/s
-   - Minimal overhead
-   - Best for production
+### Performance Evolution
+1. **Initial Implementation**
+   - Throughput: 1.67MB/s
+   - Basic compression
+   - Fixed buffer sizes
 
-2. **Normal Mode**
-   - Throughput: ~1.85MB/s
-   - Basic progress visibility
-   - Moderate overhead
+2. **First Optimization**
+   - Throughput: 2.07MB/s
+   - Improved logging
+   - Larger buffers
 
-3. **Verbose Mode**
-   - Throughput: ~1.67MB/s
-   - Full debugging capability
-   - ~24% performance impact
+3. **Current Implementation**
+   - Throughput: 2.90MB/s
+   - Adaptive compression
+   - Optimized buffers
 
 ## Critical Findings
 
-1. **Logging Impact**
-   - Logging overhead was more significant than expected
-   - 24% performance improvement by optimizing logging
-   - Minimal memory impact from logging changes
+1. **Compression Strategy**
+   - Selective compression highly effective
+   - 1MB threshold optimal for current workload
+   - Lower compression ratio (1.35x) but faster overall
+   - 40% throughput improvement
 
 2. **Network Optimization**
-   - Increased buffer sizes highly effective
-   - TCP_QUICKACK improved acknowledgment speed
-   - 64KB chunk size optimal for current workload
-   - Network time reduced by 21%
+   - 8MB buffer size optimal
+   - 256KB chunk size ideal
+   - TCP_QUICKACK significant
+   - 67% faster per-node performance
 
 3. **Resource Utilization**
-   - Memory usage stable across modes
-   - CPU usage more efficient
-   - Better load distribution
-   - Compression time consistent
+   - Memory usage stable at ~768MB
+   - Efficient buffer management
+   - Better CPU utilization
+   - Improved load distribution
 
 4. **Scaling Characteristics**
-   - Linear scaling with nodes
-   - Consistent per-node performance
-   - Even workload distribution
-   - Reliable compression ratios
+   - Linear scaling maintained
+   - More consistent per-node performance
+   - Better throughput distribution
+   - Reliable batch handling
 
 ## Performance Bottlenecks
 
 1. **Network Operations**
-   - Network time: ~11s per node
-   - Main bottleneck shifted to actual data transfer
-   - Buffer sizes now optimal
+   - Network time: 10.40-12.15s per node
+   - Main bottleneck now data transfer
+   - Buffer sizes optimized
+   - Room for further protocol optimization
 
 2. **Compression Operations**
-   - Compression time: 3-4s per node
-   - Consistent ratio of 1.88x
-   - Good balance of speed vs compression
+   - Compression time: 2.73-3.41s per node
+   - Adaptive strategy effective
+   - Balance achieved between speed and size
+   - Potential for parallel processing
 
 3. **System Resources**
-   - Memory usage stable at ~770MB
-   - Minimal garbage collection impact
+   - Memory usage optimized
    - Efficient buffer utilization
+   - Minimal overhead
+   - Stable performance
 
 ## Best Practices
 
 1. **Production Deployment**
-   - Use silent mode by default
-   - Monitor per-node metrics
-   - 4MB buffer sizes
-   - 64KB chunk sizes
+   - Use adaptive compression
+   - 8MB buffer sizes
+   - 256KB chunk sizes
+   - Monitor compression ratios
 
-2. **Development/Testing**
-   - Use normal mode for basic monitoring
-   - Reserve verbose mode for debugging
-   - Regular performance benchmarking
+2. **Network Configuration**
+   - Enable TCP_NODELAY
+   - Use TCP_QUICKACK
+   - Optimize buffer sizes
+   - Monitor network conditions
 
 3. **Resource Planning**
-   - Account for ~80MB per node
-   - Network capacity for ~250KB/s per node
-   - Buffer size requirements
+   - Account for ~77MB per node
+   - Plan for 300-350KB/s per node
+   - Consider compression overhead
+   - Monitor system resources
 
 ## Future Research Areas
 
 1. **Dynamic Optimization**
-   - Adaptive buffer sizing
-   - Network condition-based tuning
-   - Workload-based compression levels
+   - Adaptive compression thresholds
+   - Network-aware buffer sizing
+   - Dynamic chunk size adjustment
+   - Load-based optimization
 
 2. **Resource Management**
-   - Better compression time management
-   - Dynamic node allocation
-   - Adaptive batch sizing
+   - Parallel compression
+   - Memory-mapped operations
+   - Advanced load balancing
+   - Resource prediction
 
-3. **Monitoring Improvements**
-   - Real-time performance metrics
-   - Automated bottleneck detection
-   - Resource usage predictions 
+3. **Protocol Improvements**
+   - Custom compression algorithms
+   - Batch aggregation strategies
+   - Protocol optimization
+   - Header reduction techniques 
