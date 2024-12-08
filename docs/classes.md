@@ -2,37 +2,41 @@
 
 ## Classes
 
-W3XDE only contains two classes. (well, for actual use!) The `CentralServer` and the `TrainingNode`.
+W5XDE contains two main classes: `CentralServer` and `TrainingNode`.
 
 ### CentralServer
 
-The `CentralServer` class is the central hub for all training data. It's responsible for distributing batches to all connected `TrainingNode` instances, and aggregating gradients from them.
+The `CentralServer` class is the central hub for distributed training, handling batch distribution and gradient aggregation.
 
 #### Arguments
 
-- `model` The model to train. Must be a PyTorch model class.
-- `dataset` The dataset to train on. Must be a PyTorch dataset class.
-- `batch_size` The size of the batches to distribute. Default is 16.
-- `ip` The IP address to bind the server to. Default is "localhost". ("0.0.0.0" for all interfaces)
-- `port` The port to bind the server to. Default is 5555.
-- `secure` Whether or not to use encryption. Default is False.
-- `checkpoint_interval` How often to save checkpoints. Default is 5.
-  
+- `model` (required): PyTorch model to train
+- `dataset` (required): PyTorch dataset for training
+- `batch_size` (int): Size of training batches. Default: 16
+- `ip` (str): IP address to bind server. Default: "localhost". Use "0.0.0.0" for all interfaces
+- `port` (int): Port number. Default: 5555
+- `checkpoint_dir` (str): Directory for model checkpoints. Default: "checkpoints"
+- `checkpoint_interval` (int): Minutes between checkpoints. Default: 5
+- `secure` (bool): Enable encrypted communication. Default: False
+- `queue_size` (int): Size of batch queue. Default: 1000
+
 #### Methods
-- `start()` Starts the server. This is a blocking call, so it will not return until the server is stopped. 
-  
+- `start()`: Starts the server (blocking call)
+
 ### TrainingNode
 
-The `TrainingNode` class is the client that connects to the `CentralServer` to receive batches and send gradients.
+The `TrainingNode` class connects to the `CentralServer` to receive batches and send gradients.
 
 #### Arguments
 
-- `model` The model to train. Must be a PyTorch model class.
-- `server_address` A tuple of (ip, port) for the server connection. Default is ('localhost', 5555).
-- `secure` Whether or not to use encryption. Default is False.
-- `collect_metrics` Whether to collect network and compression metrics. Default is False.
+- `model` (required): PyTorch model matching server's model
+- `server_address` (tuple): Server (ip, port). Default: ('localhost', 5555)
+- `secure` (bool): Enable encrypted communication. Default: False
+- `collect_metrics` (bool): Enable performance metrics. Default: False
+- `compress_gradients` (bool): Enable gradient compression. Default: False
+- `batch_gradients` (bool): Batch gradients before sending. Default: True
 
 #### Methods
-- `train(loss_callback=None, network_callback=None)` Starts training the model.
-  - `loss_callback`: Optional callback function that receives (loss_value, batch_id)
-  - `network_callback`: Optional callback function that receives network metrics (sent_bytes, received_bytes, comp_time, net_time, orig_size, comp_size)
+- `train(loss_callback=None, network_callback=None)`: Start training
+  - `loss_callback(loss_value: float, batch_id: str)`: Track training loss
+  - `network_callback(sent_bytes: int, received_bytes: int, comp_time: float, net_time: float, orig_size: int, comp_size: int)`: Track network performance
