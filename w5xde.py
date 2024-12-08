@@ -277,7 +277,7 @@ class TrainingNode:
         self.secure = secure
         logger.info(f"Using device: {self.device}")
     
-    def train(self):
+    def train(self, loss_callback=None):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         logger.info(f"Connecting to server at {self.server_address}")
         sock.connect(self.server_address)
@@ -305,13 +305,17 @@ class TrainingNode:
 
                 self.optimizer.zero_grad()
 
-                outputs = self.model(input_ids)
-                loss = nn.CrossEntropyLoss()(
-                    outputs.view(-1, outputs.size(-1)), 
-                    input_ids.view(-1)
-                )
+                outputs = self.model(input_ids.float())
+                if labels is not None:
+                    loss = nn.CrossEntropyLoss()(outputs, labels)
+                else:
+                    loss = nn.CrossEntropyLoss()(outputs, input_ids.long())
                 
                 loss.backward()
+                
+                # Report loss if callback is provided
+                if loss_callback:
+                    loss_callback(loss.item(), batch['batch_id'])
                 
                 # Convert gradients to a serializable format
                 gradients_data = {

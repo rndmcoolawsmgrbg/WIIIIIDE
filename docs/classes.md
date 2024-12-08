@@ -27,7 +27,9 @@ The `TrainingNode` class is the client that connects to the `CentralServer` to r
 #### Arguments
 
 - `model` The model to train. Must be a PyTorch model class.
+- `server_address` A tuple of (ip, port) for the server connection. Default is ('localhost', 5555).
 - `secure` Whether or not to use encryption. Default is False. Encryption drastically slows down the submission of gradients, so only use it if you need to. (like, really need to)
 
 #### Methods
-- `train()` Starts training the model. This is a blocking call, so it will not return until training is complete.
+- `train(loss_callback=None)` Starts training the model. This is a blocking call, so it will not return until training is complete.
+  - `loss_callback`: Optional callback function that receives (loss_value, batch_id) for tracking training progress.

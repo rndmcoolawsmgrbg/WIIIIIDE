@@ -39,4 +39,14 @@ node = TrainingNode(MODEL_CLASS)
 node.train()
 ```
 
-And that's it! WIIIIIDE will take care of the rest. (For more info, check out the [arguements and classes](classes.md))
+You can also track training progress by providing a callback function:
+
+```python
+def track_progress(loss, batch_id):
+    print(f"Batch {batch_id}: loss = {loss:.4f}")
+
+node = TrainingNode(MODEL_CLASS)
+node.train(loss_callback=track_progress)
+```
+
+And that's it! WIIIIIDE will take care of the rest. (For more info, check out the [arguments and classes](classes.md))
