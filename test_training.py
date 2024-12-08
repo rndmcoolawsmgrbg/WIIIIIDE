@@ -327,15 +327,53 @@ def main():
             # Ask about gradient compression
             use_compression = get_user_input("Enable gradient compression? (y/n): ")
             
+            # Ask about logging mode
+            print("\nLogging modes:")
+            print("1. Silent (default) - only final metrics")
+            print("2. Normal - basic progress updates")
+            print("3. Verbose - detailed logging")
+            log_mode = input("Select logging mode (1-3, default=1): ").strip() or "1"
+            
+            # Set logging levels based on mode
+            if log_mode == "1":  # Silent
+                logging.getLogger('w5xde').setLevel(logging.ERROR)
+                logging.getLogger('__main__').setLevel(logging.ERROR)
+            elif log_mode == "2":  # Normal
+                logging.getLogger('w5xde').setLevel(logging.WARNING)
+                logging.getLogger('__main__').setLevel(logging.INFO)
+            else:  # Verbose
+                logging.getLogger('w5xde').setLevel(logging.INFO)
+                logging.getLogger('__main__').setLevel(logging.INFO)
+            
             # Run training session
             success = run_training_session(num_nodes, use_compression)
             
+            # Always show final metrics
+            logger.info("\nFinal Training Metrics:")
+            logger.info("-" * 20)
+            logger.info(f"Total batches processed: {stats.total_batches}")
+            logger.info(f"Total network throughput: {format_throughput(sum(ns.get_throughput() for ns in stats.network_stats.values()))}")
+            logger.info(f"Average compression ratio: {sum(ns.get_compression_ratio() for ns in stats.network_stats.values()) / len(stats.network_stats):.2f}x")
+            logger.info(f"Memory Usage: {format_size(get_process_memory())}")
+            
+            if log_mode == "3":  # Verbose mode gets additional statistics
+                logger.info("\nDetailed Statistics:")
+                logger.info("-" * 20)
+                logger.info(f"Average loss: {stats.get_average_loss():.4f}")
+                logger.info(f"Training time: {stats.get_training_time():.2f}s")
+                logger.info("\nPer-node Statistics:")
+                for node_id, node_stat in stats.node_stats.items():
+                    logger.info(f"\nNode {node_id}:")
+                    logger.info(f"  Batches processed: {node_stat['batches']}")
+                    logger.info(f"  Average loss: {node_stat['total_loss'] / node_stat['batches']:.4f}")
+                    logger.info(f"  Network throughput: {format_throughput(stats.network_stats[node_id].get_throughput())}")
+                    logger.info(f"  Compression ratio: {stats.network_stats[node_id].get_compression_ratio():.2f}x")
+            
             # Ask to run again
-            logger.info("\nWould you like to run another training session?")
-            if not get_user_input("Run again? (y/n): "):
+            if not get_user_input("\nRun again? (y/n): "):
                 logger.info("Exiting...")
                 cleanup_ports()
-                os._exit(0)  # Force exit to ensure all threads are stopped
+                os._exit(0)
 
     except KeyboardInterrupt:
         logger.info("\nExiting...")
