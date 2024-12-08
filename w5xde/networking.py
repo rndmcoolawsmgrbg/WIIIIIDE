@@ -34,191 +34,193 @@ TORCH_TO_NUMPY_DTYPE = {
 }
 
 def send_msg(sock, msg, collect_metrics=False):
-    """Highly optimized message sending."""
+    """Adaptive message sending with dynamic chunking."""
     if collect_metrics:
         start_comp = time.time()
     
-    # Optimize serialization based on message type
+    # Adaptive serialization
     if isinstance(msg, dict):
-        # Handle torch/numpy data specially
         serialized_data = {}
         for key, value in msg.items():
             if isinstance(value, torch.Tensor):
-                # Handle special tensor types and ensure contiguous memory
-                value = value.detach().contiguous()
+                # Get tensor size and adapt chunk size accordingly
+                tensor_bytes = value.numel() * value.element_size()
+                # Use smaller chunks for larger tensors
+                chunk_size = max(1024, min(tensor_bytes // 10, 1024 * 1024))
+                
+                # Detach and move to CPU
+                value = value.detach().cpu()
                 if value.dtype == torch.bfloat16:
                     value = value.float()
                 
-                serialized_data[key] = {
-                    'type': 'torch_tensor',
-                    'data': value.cpu().numpy().tobytes(),
-                    'shape': value.shape,
-                    'dtype': str(value.dtype),
-                    'requires_grad': value.requires_grad
-                }
-            elif isinstance(value, np.ndarray):
-                # Ensure array is contiguous
-                if not value.flags.c_contiguous:
-                    value = np.ascontiguousarray(value)
-                
-                serialized_data[key] = {
-                    'type': 'numpy_array',
-                    'data': value.tobytes(),
-                    'shape': value.shape,
-                    'dtype': str(value.dtype)
-                }
+                # Split large tensors
+                if tensor_bytes > chunk_size:
+                    num_chunks = (tensor_bytes + chunk_size - 1) // chunk_size
+                    splits = value.split(value.shape[0] // num_chunks)
+                    serialized_data[key] = {
+                        'type': 'tensor_chunks',
+                        'chunks': [chunk.numpy() for chunk in splits],
+                        'shape': value.shape,
+                        'dtype': str(value.dtype)
+                    }
+                else:
+                    serialized_data[key] = {
+                        'type': 'tensor',
+                        'data': value.numpy(),
+                        'shape': value.shape,
+                        'dtype': str(value.dtype)
+                    }
             else:
-                # Fallback to pickle for other types
                 serialized_data[key] = {
-                    'type': 'pickled',
+                    'type': 'pickle',
                     'data': pickle.dumps(value, protocol=5)
                 }
         
-        # Pickle the structure but not the actual data
         msg_bytes = pickle.dumps(serialized_data, protocol=5)
     else:
-        # Fallback for non-dict messages
         msg_bytes = pickle.dumps(msg, protocol=5)
     
-    original_size = len(msg_bytes) if collect_metrics else 0
-    
-    # Optimize compression strategy with LZ4 block mode
-    if isinstance(msg, dict) and 'gradients' in msg:
-        if len(msg_bytes) > 512 * 1024:  # 512KB threshold
-            # Ultra-fast compression for large gradients
-            compressed_msg = lz4.block.compress(
-                msg_bytes,
-                mode='fast',
-                acceleration=8,  # Maximum speed
-                store_size=False
-            )
-            is_compressed = True
-        else:
-            compressed_msg = msg_bytes
-            is_compressed = False
+    # Adaptive compression based on data size
+    if len(msg_bytes) > 1024 * 1024:  # 1MB
+        compressed = lz4.block.compress(msg_bytes, mode='fast', acceleration=1)
     else:
-        # Fast compression for non-gradient data
-        compressed_msg = lz4.block.compress(
-            msg_bytes,
-            mode='fast',
-            acceleration=4  # Balance of speed and compression
-        )
-        is_compressed = True
+        compressed = msg_bytes
     
-    compressed_size = len(compressed_msg) if collect_metrics else 0
+    is_compressed = len(msg_bytes) > 1024 * 1024
     
     if collect_metrics:
         comp_time = time.time() - start_comp
         start_net = time.time()
     
-    # Send compression flag first
-    flag = struct.pack("?", is_compressed)
-    msg_len = len(compressed_msg)
-    header = struct.pack(">I", msg_len)
-    
     try:
-        # Send in a single call if possible
-        sock.sendall(flag + header + compressed_msg)
-    except BlockingIOError:
-        # Fall back to chunked sending if needed
-        sock.sendall(flag)
+        # Send metadata
+        metadata = {
+            'size': len(compressed),
+            'compressed': is_compressed
+        }
+        metadata_bytes = pickle.dumps(metadata, protocol=5)
+        header = struct.pack(">I", len(metadata_bytes))
         sock.sendall(header)
-        CHUNK_SIZE = 1024 * 1024  # 1MB chunks
-        for i in range(0, len(compressed_msg), CHUNK_SIZE):
-            chunk = compressed_msg[i:i + CHUNK_SIZE]
-            sock.sendall(chunk)
+        sock.sendall(metadata_bytes)
+        
+        # Send data in adaptive chunks
+        chunk_size = min(8192, len(compressed))  # Start small
+        pos = 0
+        while pos < len(compressed):
+            # Increase chunk size gradually if transfer is smooth
+            if pos > 0 and pos % (chunk_size * 10) == 0:
+                chunk_size = min(chunk_size * 2, 1024 * 1024)
+            
+            end = min(pos + chunk_size, len(compressed))
+            sock.sendall(compressed[pos:end])
+            pos = end
+            
+    except Exception as e:
+        logger.error(f"Send error: {e}")
+        raise
     
     if collect_metrics:
         net_time = time.time() - start_net
         return {
-            'sent_bytes': msg_len + 5,
+            'sent_bytes': len(compressed),
             'received_bytes': 0,
             'comp_time': comp_time,
             'net_time': net_time,
-            'original_size': original_size,
-            'compressed_size': compressed_size
+            'original_size': len(msg_bytes),
+            'compressed_size': len(compressed)
         }
     return None
 
 def recv_msg(sock, collect_metrics=False):
-    """High-performance data receiving."""
+    """Adaptive message receiving with dynamic buffering."""
     if collect_metrics:
         start_net = time.time()
     
-    # Receive compression flag
-    flag_bytes = recvall(sock, 1)
-    if not flag_bytes:
+    try:
+        # Receive metadata
+        header = recvall(sock, 4)
+        if header is None:
+            return (None, None) if collect_metrics else None
+            
+        header_size = struct.unpack(">I", header)[0]
+        metadata_bytes = recvall(sock, header_size)
+        if metadata_bytes is None:
+            return (None, None) if collect_metrics else None
+            
+        metadata = pickle.loads(metadata_bytes)
+        
+        # Receive data with adaptive buffering
+        data = bytearray(metadata['size'])
+        view = memoryview(data)
+        pos = 0
+        chunk_size = min(8192, metadata['size'])  # Start small
+        
+        while pos < metadata['size']:
+            try:
+                remaining = metadata['size'] - pos
+                current_chunk = min(chunk_size, remaining)
+                received = sock.recv_into(view[pos:pos + current_chunk], current_chunk)
+                
+                if not received:
+                    return (None, None) if collect_metrics else None
+                pos += received
+                
+                # Increase chunk size gradually if transfer is smooth
+                if pos > 0 and pos % (chunk_size * 10) == 0:
+                    chunk_size = min(chunk_size * 2, 1024 * 1024)
+                    
+            except socket.error as e:
+                logger.error(f"Socket error during receive: {e}")
+                return (None, None) if collect_metrics else None
+        
+        if collect_metrics:
+            net_time = time.time() - start_net
+            start_comp = time.time()
+        
+        try:
+            # Decompress if needed
+            if metadata['compressed']:
+                msg_bytes = lz4.block.decompress(data)
+            else:
+                msg_bytes = data
+            
+            # Deserialize
+            received_data = pickle.loads(msg_bytes)
+            
+            if isinstance(received_data, dict):
+                deserialized = {}
+                for key, value in received_data.items():
+                    if value['type'] == 'tensor_chunks':
+                        # Reconstruct tensor from chunks
+                        chunks = [torch.from_numpy(chunk) for chunk in value['chunks']]
+                        deserialized[key] = torch.cat(chunks).reshape(value['shape'])
+                    elif value['type'] == 'tensor':
+                        deserialized[key] = torch.from_numpy(value['data'])
+                    else:  # 'pickle'
+                        deserialized[key] = pickle.loads(value['data'])
+                received_data = deserialized
+            
+            if collect_metrics:
+                comp_time = time.time() - start_comp
+                metrics = {
+                    'sent_bytes': 0,
+                    'received_bytes': metadata['size'],
+                    'comp_time': comp_time,
+                    'net_time': net_time,
+                    'original_size': len(msg_bytes),
+                    'compressed_size': metadata['size']
+                }
+                return received_data, metrics
+            
+            return received_data
+            
+        except Exception as e:
+            logger.error(f"Error processing received data: {e}")
+            return (None, None) if collect_metrics else None
+            
+    except Exception as e:
+        logger.error(f"Receive error: {e}")
         return (None, None) if collect_metrics else None
-    is_compressed = struct.unpack("?", flag_bytes)[0]
-    
-    # Receive length
-    raw_msglen = recvall(sock, 4)
-    if not raw_msglen:
-        return (None, None) if collect_metrics else None
-    
-    msglen = struct.unpack('>I', raw_msglen)[0]
-    
-    # Receive data
-    msg_data = recvall(sock, msglen)
-    if msg_data is None:
-        return (None, None) if collect_metrics else None
-    
-    if collect_metrics:
-        net_time = time.time() - start_net
-        start_comp = time.time()
-    
-    # Decompress if necessary using LZ4 block mode
-    if is_compressed:
-        msg_bytes = lz4.block.decompress(msg_data)
-    else:
-        msg_bytes = msg_data
-    
-    # Deserialize with special handling for torch/numpy data
-    data = pickle.loads(msg_bytes)
-    
-    if isinstance(data, dict):
-        # Check if this is our special serialized format
-        if all(isinstance(v, dict) and 'type' in v for v in data.values()):
-            deserialized_data = {}
-            for key, value in data.items():
-                try:
-                    if value['type'] == 'torch_tensor':
-                        numpy_dtype = TORCH_TO_NUMPY_DTYPE.get(value['dtype'], 'float32')
-                        array = np.frombuffer(value['data'], dtype=numpy_dtype).copy()
-                        array = array.reshape(value['shape'])
-                        tensor = torch.from_numpy(array)
-                        
-                        # Restore requires_grad if needed
-                        if value.get('requires_grad', False):
-                            tensor.requires_grad_(True)
-                            
-                        deserialized_data[key] = tensor
-                    elif value['type'] == 'numpy_array':
-                        array = np.frombuffer(value['data'], dtype=np.dtype(value['dtype'])).copy()
-                        deserialized_data[key] = array.reshape(value['shape'])
-                    else:  # 'pickled'
-                        deserialized_data[key] = pickle.loads(value['data'])
-                except Exception as e:
-                    logger.warning(f"Error deserializing key {key}: {e}. Using pickle fallback.")
-                    deserialized_data[key] = pickle.loads(value['data'])
-            msg = deserialized_data
-        else:
-            msg = data
-    else:
-        msg = data
-    
-    if collect_metrics:
-        comp_time = time.time() - start_comp
-        metrics = {
-            'sent_bytes': 0,
-            'received_bytes': msglen + 5,  # +5 for header and flag
-            'comp_time': comp_time,
-            'net_time': net_time,
-            'original_size': len(msg_bytes),
-            'compressed_size': msglen
-        }
-        return msg, metrics
-    return msg
 
 def generate_key():
     return base64.urlsafe_b64encode(os.urandom(32))
@@ -370,88 +372,51 @@ def perform_handshake(sock, is_server=True):
         raise
 
 def recvall(sock, n):
-    """Zero-copy high-performance data receiving."""
+    """Basic receive all bytes."""
     data = bytearray(n)
-    view = memoryview(data)
     pos = 0
-    
-    # Increased chunk size for better throughput
-    chunk_size = min(1024 * 1024, n)  # 1MB chunks
-    
     while pos < n:
-        try:
-            # Direct recv_into with larger chunks
-            received = sock.recv_into(view[pos:pos + chunk_size], chunk_size)
-            if not received:
-                return None
-            pos += received
-        except BlockingIOError:
-            # Minimal polling with select
-            select.select([sock], [], [], 0.001)  # 1ms timeout
-            continue
-        except socket.error as e:
-            if e.errno != errno.EAGAIN:
-                raise
-            select.select([sock], [], [], 0.001)
-    
-    return bytes(data)
+        received = sock.recv_into(memoryview(data)[pos:], n - pos)
+        if not received:
+            return None
+        pos += received
+    return data
 
 def configure_socket(sock):
-    """Enhanced socket configuration for maximum performance."""
+    """Enhanced socket configuration."""
     try:
-        # Increase buffer sizes significantly
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024)  # 16MB
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16 * 1024 * 1024)  # 16MB
+        # Use smaller buffer sizes
+        BUFFER_SIZE = 1024 * 1024  # 1MB buffer
+        
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, BUFFER_SIZE)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, BUFFER_SIZE)
         
         # Enable TCP optimizations
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         
-        # Platform specific optimizations
-        if sys.platform.startswith('linux'):
-            # Linux-specific TCP optimizations
-            try:
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
-                
-                # TCP FastOpen (23)
-                sock.setsockopt(socket.IPPROTO_TCP, 23, 1)
-                
-                # TCP thin-stream optimizations
-                # TCP_THIN_LINEAR_TIMEOUTS (16)
-                sock.setsockopt(socket.IPPROTO_TCP, 16, 1)
-                # TCP_THIN_DUPACK (17)
-                sock.setsockopt(socket.IPPROTO_TCP, 17, 1)
-            except (AttributeError, OSError):
-                pass
+        # Don't set a global timeout - handle timeouts per operation
+        sock.setblocking(True)
         
-        elif sys.platform == 'darwin':
-            try:
-                # MacOS specific optimizations
-                # TCP_NOTSENT_LOWAT (25)
-                sock.setsockopt(socket.IPPROTO_TCP, 25, 16384)
-            except (AttributeError, OSError):
-                pass
-                
-        elif sys.platform == 'win32':
-            try:
-                # Windows specific optimizations
-                # Disable Nagle's algorithm
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                
-                # Enable keep-alive with shorter timeout
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                
-                # TCP_FASTOPEN is supported on Windows 10 1607 and later
-                try:
-                    # TCP_FASTOPEN (15)
-                    sock.setsockopt(socket.IPPROTO_TCP, 15, 1)
-                except (AttributeError, OSError):
-                    pass
-            except (AttributeError, OSError):
-                pass
+    except Exception as e:
+        logger.warning(f"Socket configuration warning: {e}")
 
-    except OSError as e:
-        logger.error(f"Socket configuration error: {e}, Ignoring")
+def configure_server_socket(server_socket):
+    """Configure server-specific socket settings."""
+    try:
+        # Make server socket non-blocking
+        server_socket.setblocking(False)
+        
+        # Use smaller buffer sizes
+        BUFFER_SIZE = 1024 * 1024  # 1MB buffer
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, BUFFER_SIZE)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, BUFFER_SIZE)
+        
+        # Enable address reuse
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+    except Exception as e:
+        logger.warning(f"Server socket configuration warning: {e}")
 
 def connect_with_retry(sock, server_address, timeout=30):
     """Connect with retry for non-blocking sockets."""
