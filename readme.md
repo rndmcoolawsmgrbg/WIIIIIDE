@@ -52,7 +52,7 @@ node.train()
 ```
 
 There you have it! WIIIIIDE will take care of the rest.
-If you require a more detailed example, check out [node.py](node.py) and [server.py](server.py).
+If you require a more detailed example, check out [lstm_node.py](lstm_node.py) and [lstm_server.py](lstm_server.py) for NLP tasks, and [test_training.py](test_training.py) classification (entirely local, for testing pre-production)
 
 ## How It Works: Behind the Scenes
 

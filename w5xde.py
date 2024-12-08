@@ -377,6 +377,22 @@ def connect_with_retry(sock, server_address, timeout=30):
 class CentralServer:
     def __init__(self, model, dataset, batch_size=16, ip="localhost", port=5555,
                  checkpoint_dir="checkpoints", checkpoint_interval=5, secure=False):
+        """
+        The class for the central server in a distributed training setup.
+        
+        Args:
+            model: The PyTorch model to train (Required)
+            dataset: The PyTorch Dataset object for training data (Required)
+            batch_size: The batch size for training
+            ip: The IP address to bind the server to
+            port: The port to bind the server to
+            checkpoint_dir: The directory to save model checkpoints
+            checkpoint_interval: The interval in minutes to save checkpoints
+            secure: Whether to enable secure communication
+
+        Methods:
+            start: Start the server and listen for connections
+        """
         self.model = model
         self.dataset = dataset
         self.batch_size = batch_size
@@ -574,6 +590,20 @@ class TrainingNode:
     def __init__(self, model, server_address=('localhost', 5555), 
                  secure=False, collect_metrics=False, compress_gradients=False,
                  batch_gradients=True):
+        """
+        The class for a training node in a distributed training setup.
+
+        Args:
+            model: The PyTorch model to train (Required)
+            server_address: The address of the central server (Default: ('localhost', 5555))
+            secure: Whether to enable secure communication
+            collect_metrics: Whether to collect network metrics
+            compress_gradients: Whether to compress gradients
+            batch_gradients: Whether to batch gradients for compression
+        
+        Methods:
+            train: Start training the model
+        """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
         self.server_address = server_address
