@@ -25,18 +25,19 @@ def send_msg(sock, msg, collect_metrics=False):
     msg_bytes = pickle.dumps(msg, protocol=5, buffer_callback=lambda x: x)
     original_size = len(msg_bytes) if collect_metrics else 0
     
-    # Use different compression strategies based on data type and size
+    # Optimize compression strategy
     if isinstance(msg, dict) and 'gradients' in msg:
-        if len(msg_bytes) > 1024 * 1024:  # 1MB
-            # For large gradients, use fast compression
+        if len(msg_bytes) > 512 * 1024:  # Reduced threshold to 512KB
+            # Use fastest compression for large gradients
             compressed_msg = zlib.compress(msg_bytes, level=1)
             is_compressed = True
         else:
-            # For smaller gradients, skip compression
+            # Skip compression for smaller messages
             compressed_msg = msg_bytes
             is_compressed = False
     else:
-        compressed_msg = zlib.compress(msg_bytes, level=9)
+        # Use moderate compression for non-gradient data
+        compressed_msg = zlib.compress(msg_bytes, level=3)  # Reduced from level 9
         is_compressed = True
     
     compressed_size = len(compressed_msg) if collect_metrics else 0
@@ -51,17 +52,21 @@ def send_msg(sock, msg, collect_metrics=False):
     header = struct.pack(">I", msg_len)
     
     try:
-        # Send flag, length and data
+        # Send in a single call if possible
         sock.sendall(flag + header + compressed_msg)
     except BlockingIOError:
+        # Fall back to chunked sending if needed
         sock.sendall(flag)
         sock.sendall(header)
-        sock.sendall(compressed_msg)
+        CHUNK_SIZE = 1024 * 1024  # 1MB chunks
+        for i in range(0, len(compressed_msg), CHUNK_SIZE):
+            chunk = compressed_msg[i:i + CHUNK_SIZE]
+            sock.sendall(chunk)
     
     if collect_metrics:
         net_time = time.time() - start_net
         return {
-            'sent_bytes': msg_len + 5,  # +5 for header and flag
+            'sent_bytes': msg_len + 5,
             'received_bytes': 0,
             'comp_time': comp_time,
             'net_time': net_time,
@@ -262,47 +267,67 @@ def perform_handshake(sock, is_server=True):
         raise
 
 def recvall(sock, n):
-    """High-performance data receiving."""
+    """Zero-copy high-performance data receiving."""
     data = bytearray(n)
     view = memoryview(data)
     pos = 0
     
-    # Use 256KB chunks for better throughput
-    chunk_size = min(256 * 1024, n)
+    # Increased chunk size for better throughput
+    chunk_size = min(1024 * 1024, n)  # 1MB chunks
     
     while pos < n:
         try:
-            while True:
-                try:
-                    received = sock.recv_into(view[pos:pos + chunk_size])
-                    if not received:
-                        return None
-                    pos += received
-                    break
-                except BlockingIOError:
-                    select.select([sock], [], [])
-                    continue
-                except socket.error as e:
-                    if e.errno != errno.EAGAIN:
-                        raise
-                    select.select([sock], [], [])
-        except Exception as e:
-            logger.error(f"Receive error: {e}")
-            raise
+            # Direct recv_into with larger chunks
+            received = sock.recv_into(view[pos:pos + chunk_size], chunk_size)
+            if not received:
+                return None
+            pos += received
+        except BlockingIOError:
+            # Minimal polling with select
+            select.select([sock], [], [], 0.001)  # 1ms timeout
+            continue
+        except socket.error as e:
+            if e.errno != errno.EAGAIN:
+                raise
+            select.select([sock], [], [], 0.001)
     
     return bytes(data)
 
 def configure_socket(sock):
+    """Enhanced socket configuration for maximum performance."""
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8 * 1024 * 1024)
+        # Increase buffer sizes significantly
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024)  # 16MB
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16 * 1024 * 1024)  # 16MB
+        
+        # Enable TCP optimizations
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        try:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
-        except AttributeError:
-            logger.error("TCP_QUICKACK not supported on this platform.")
-            sock.setsockopt(socket.SOL_TCP, socket.TCP_FASTOPEN, 1)
+        
+        # Platform specific optimizations
+        if sys.platform.startswith('linux'):
+            # Linux-specific TCP optimizations
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
+                
+                # TCP FastOpen (23)
+                sock.setsockopt(socket.IPPROTO_TCP, 23, 1)
+                
+                # TCP thin-stream optimizations
+                # TCP_THIN_LINEAR_TIMEOUTS (16)
+                sock.setsockopt(socket.IPPROTO_TCP, 16, 1)
+                # TCP_THIN_DUPACK (17)
+                sock.setsockopt(socket.IPPROTO_TCP, 17, 1)
+            except (AttributeError, OSError):
+                pass
+        
+        elif sys.platform == 'darwin':
+            try:
+                # MacOS specific optimizations
+                # TCP_NOTSENT_LOWAT (25)
+                sock.setsockopt(socket.IPPROTO_TCP, 25, 16384)
+            except (AttributeError, OSError):
+                pass
 
     except OSError as e:
         logger.error(f"Socket configuration error: {e}, Ignoring")
