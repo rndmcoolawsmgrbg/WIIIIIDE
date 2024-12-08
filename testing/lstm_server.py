@@ -1,5 +1,5 @@
 from transformers import AutoTokenizer
-from w5xde import CentralServer
+from w5xde.w5xde import CentralServer
 from custom_functions import Model, TextDataset
 
 if __name__ == "__main__":
