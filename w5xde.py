@@ -11,6 +11,12 @@ import threading
 import queue
 import logging
 import time
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import base64
+import os
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,6 +39,115 @@ def recv_msg(sock):
     msg = zlib.decompress(msg)
     return pickle.loads(msg)
 
+def generate_key():
+    return base64.urlsafe_b64encode(os.urandom(32))
+
+class SecureConnection:
+    def __init__(self):
+        self.fernet = None
+    
+    def create_key(self, shared_secret):
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=b'static_salt',
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(shared_secret))
+        self.fernet = Fernet(key)
+
+    def encrypt_message(self, msg):
+        if not isinstance(msg, bytes):
+            msg = bytes(msg)
+        return self.fernet.encrypt(msg)
+
+    def decrypt_message(self, encrypted_msg):
+        if isinstance(encrypted_msg, bytearray):
+            encrypted_msg = bytes(encrypted_msg)
+        return self.fernet.decrypt(encrypted_msg)
+
+def secure_send_msg(sock, msg, secure_conn):
+    try:
+        pickled_msg = pickle.dumps(msg)
+        compressed_msg = zlib.compress(pickled_msg)
+        encrypted_msg = secure_conn.encrypt_message(compressed_msg)
+        msg_len = len(encrypted_msg)
+        sock.sendall(struct.pack(">I", msg_len))
+        sock.sendall(encrypted_msg)
+        
+    except Exception as e:
+        logger.error(f"Error in secure_send_msg: {e}")
+        raise
+
+def secure_recv_msg(sock, secure_conn):
+    try:
+        raw_msglen = recvall(sock, 4)
+        if not raw_msglen:
+            return None
+        msglen = struct.unpack('>I', raw_msglen)[0]
+        encrypted_msg = recvall(sock, msglen)
+        if encrypted_msg is None:
+            return None
+        decrypted_msg = secure_conn.decrypt_message(encrypted_msg)
+        decompressed_msg = zlib.decompress(decrypted_msg)
+        return pickle.loads(decompressed_msg)
+        
+    except Exception as e:
+        logger.error(f"Error in secure_recv_msg: {e}")
+        raise
+
+def perform_handshake(sock, is_server=True):
+    try:
+        secure_conn = SecureConnection()
+        
+        if is_server:
+            # Server generates and sends a challenge
+            challenge = os.urandom(32)
+            sock.sendall(struct.pack(">I", len(challenge)))
+            sock.sendall(challenge)
+            
+            # Receive response from client
+            response_len = struct.unpack(">I", recvall(sock, 4))[0]
+            response = recvall(sock, response_len)
+            
+        else:
+            # Client receives challenge
+            challenge_len = struct.unpack(">I", recvall(sock, 4))[0]
+            challenge = recvall(sock, challenge_len)
+            
+            # Client generates and sends response
+            response = os.urandom(32)
+            sock.sendall(struct.pack(">I", len(response)))
+            sock.sendall(response)
+        
+        # Create shared secret
+        shared_secret = challenge + response
+        secure_conn.create_key(shared_secret)
+        
+        # Verify connection
+        if is_server:
+            verify_msg = b"SERVER_VERIFY"
+            sock.sendall(struct.pack(">I", len(verify_msg)))
+            sock.sendall(verify_msg)
+            
+            client_verify = recvall(sock, struct.unpack(">I", recvall(sock, 4))[0])
+            if client_verify != b"CLIENT_VERIFY":
+                raise Exception("Handshake verification failed")
+        else:
+            server_verify = recvall(sock, struct.unpack(">I", recvall(sock, 4))[0])
+            if server_verify != b"SERVER_VERIFY":
+                raise Exception("Handshake verification failed")
+                
+            verify_msg = b"CLIENT_VERIFY"
+            sock.sendall(struct.pack(">I", len(verify_msg)))
+            sock.sendall(verify_msg)
+            
+        return secure_conn
+        
+    except Exception as e:
+        logger.error(f"Error in handshake: {e}")
+        raise
+
 def recvall(sock, n):
     data = bytearray()
     while len(data) < n:
@@ -40,12 +155,11 @@ def recvall(sock, n):
         if not packet:
             return None
         data.extend(packet)
-    return data
-
+    return bytes(data)
 
 class CentralServer:
     def __init__(self, model, dataset, batch_size=16, ip="localhost", port=5555,
-                 checkpoint_dir="checkpoints", checkpoint_interval=5):
+                 checkpoint_dir="checkpoints", checkpoint_interval=5, secure=False):
         self.model = model
         self.dataset = dataset
         self.batch_size = batch_size
@@ -59,6 +173,7 @@ class CentralServer:
         self.checkpoint_interval = checkpoint_interval
         self.last_checkpoint = time.time()
         self.global_step = 0
+        self.secure = secure
 
     def distribute_batches(self):
         logger.info("Starting batch distribution...")
@@ -89,29 +204,42 @@ class CentralServer:
     def handle_node(self, conn, addr):
         logger.info(f"New node connected: {addr}")
         try:
+            if self.secure:
+                secure_conn = perform_handshake(conn, is_server=True)
+                logger.info(f"Completed handshake with node {addr}")
+            
             while self.running:
                 if not self.batch_queue.empty():
                     batch = self.batch_queue.get()
                     logger.info(f"Sending batch {batch['batch_id']} to node {addr}")
-                    send_msg(conn, batch)
+                    
+                    if self.secure:
+                        secure_send_msg(conn, batch, secure_conn)
+                    else:
+                        send_msg(conn, batch)
                     
                     logger.info(f"Waiting for gradients from node {addr}")
-                    gradients = recv_msg(conn)
-                    if gradients is None:
+                    if self.secure:
+                        gradients_data = secure_recv_msg(conn, secure_conn)
+                    else:
+                        gradients_data = recv_msg(conn)
+                        
+                    if gradients_data is None:
                         logger.warning(f"Received None gradients from {addr}")
                         break
                     
-                    logger.info(f"Received gradients from node {addr}")
+                    # Convert received gradients back to tensors
+                    gradients = [
+                        torch.tensor(grad) if grad is not None else None 
+                        for grad in gradients_data['gradients']
+                    ]
+                    
+                    logger.info(f"Received gradients for batch {gradients_data['batch_id']}")
                     self.gradient_queue.put(gradients)
                 else:
                     logger.debug("Batch queue is empty, waiting...")
                     time.sleep(0.1)
 
-                if self.global_step % self.checkpoint_interval == 0:
-                    logger.info("Saving checkpoint...")
-                    torch.save(self.model.state_dict(), f"{self.checkpoint_dir}/model_{self.global_step}.pt")
-                    self.last_checkpoint = time.time()
-                    logger.info("Checkpoint saved")
         except Exception as e:
             logger.error(f"Error handling node {addr}: {e}")
         finally:
@@ -140,12 +268,13 @@ class CentralServer:
             server.close()
 
 class TrainingNode:
-    def __init__(self, model, server_address=('localhost', 5555)):
+    def __init__(self, model, server_address=('localhost', 5555), secure=False):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
         self.server_address = server_address
         self.optimizer = torch.optim.Adam(model.parameters())
         self.running = True
+        self.secure = secure
         logger.info(f"Using device: {self.device}")
     
     def train(self):
@@ -154,9 +283,16 @@ class TrainingNode:
         sock.connect(self.server_address)
         
         try:
+            if self.secure:
+                secure_conn = perform_handshake(sock, is_server=False)
+                logger.info("Completed handshake with server")
+            
             while self.running:
                 logger.info("Waiting for batch from server...")
-                batch = recv_msg(sock)
+                if self.secure:
+                    batch = secure_recv_msg(sock, secure_conn)
+                else:
+                    batch = recv_msg(sock)
                 if batch is None:
                     logger.warning("Received None batch")
                     break
@@ -176,10 +312,21 @@ class TrainingNode:
                 )
                 
                 loss.backward()
-                gradients = [param.grad.data.cpu() for param in self.model.parameters()]
+                
+                # Convert gradients to a serializable format
+                gradients_data = {
+                    'batch_id': batch['batch_id'],
+                    'gradients': [
+                        grad.cpu().numpy().tolist() if grad is not None else None 
+                        for grad in [param.grad for param in self.model.parameters()]
+                    ]
+                }
                 
                 logger.info(f"Sending gradients for batch {batch['batch_id']}")
-                send_msg(sock, gradients)
+                if self.secure:
+                    secure_send_msg(sock, gradients_data, secure_conn)
+                else:
+                    send_msg(sock, gradients_data)
                 
                 logger.info(f"Training loss: {loss.item():.4f}")
                 

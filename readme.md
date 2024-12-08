@@ -4,13 +4,15 @@
 
 Drawing inspiration from cryptocurrency mining pools, W5XDE lets you train deep learning models across multiple nodes with ease. WIIIIIDE is designed to be simple to use, yet powerful enough to handle your training needs.
 
+[DOCUMENTATION](docs/classes.md)
+
 ## Why WIIIIIDE?
 
-Training deep learning models can be painfully slow. WIIIIIDE is here to change that by offering:
+Training deep learning models can be painfully slow. WIIIIIDE is here to (hopefully) change that by offering:
 
-- **Effortless Centralized Deployment**: Set up a central coordinator and let the magic happen.
-- **Smart Peer-to-Peer Communication**: Distribute your training workload intelligently across nodes.
-- **Plug-and-Play Simplicity**: Get started with minimal configuration headaches. (We hope....)
+- **Effortless Centralized Deployment**: Set up a central coordinator, and let your nodes do the rest.
+- **Peer-to-Peer Communication**: Distribute your training workload across nodes.
+- **Plug-and-Play Simplicity**: Get started with minimal configuration headaches. (We hope...)
 
 ## Getting Started
 
@@ -35,7 +37,7 @@ WIIIIIDE is designed to be straightforward to use. Here's a few examples to get 
 ```python
 from w5xde import CentralServer
 
-server = CentralServer(model, dataset, batch_size=128, ip="0.0.0.0", port=5555)
+server = CentralServer(model, dataset, batch_size=128, ip="0.0.0.0", port=5555, secure=False)
 server.start()
 ```
 
@@ -43,7 +45,7 @@ server.start()
 ```python
 from w5xde import TrainingNode
 
-node = TrainingNode(MODEL_CLASS)
+node = TrainingNode(MODEL_CLASS, secure=False)
 node.train()
 ```
 
@@ -80,7 +82,6 @@ flowchart TD
 
 We're transparent about where WIIIIIDE is right now:
 
-- **Central Coordination**: Currently relies on a single central server.
 - **Network Dependency**: Requires a stable, high-bandwidth connection.
 - **Security Considerations**: No built-in encryption yet - best used on secure networks. (We're going to tackle this soon with enough interest!)
 - **Resource Management**: Recommended to use on dedicated servers.
