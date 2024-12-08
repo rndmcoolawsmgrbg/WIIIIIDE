@@ -1,4 +1,4 @@
-from w5xde import TrainingNode
+from w5xde.w5xde import TrainingNode
 from custom_functions import Model
 
 if __name__ == "__main__":

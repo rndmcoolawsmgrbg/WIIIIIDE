@@ -200,7 +200,6 @@ class TrainingManager:
         logger.info(f"Total batches processed: {stats.total_batches}")
         logger.info(f"Total network throughput: {format_throughput(sum(ns.get_throughput() for ns in stats.network_stats.values()))}")
         logger.info(f"Average compression ratio: {sum(ns.get_compression_ratio() for ns in stats.network_stats.values()) / len(stats.network_stats):.2f}x")
-        logger.info(f"Memory Usage: {format_size(get_process_memory())}")
     
     def run(self):
         """Main training loop"""
@@ -291,11 +290,6 @@ def format_size(bytes):
 def format_throughput(bytes_per_sec):
     """Convert bytes/sec to human readable string"""
     return f"{format_size(bytes_per_sec)}/s"
-
-def get_process_memory():
-    """Get current process memory usage"""
-    import resource
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
 
 def run_training_session(num_nodes, use_compression):
     """Run a single training session"""

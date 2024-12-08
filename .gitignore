@@ -3,38 +3,32 @@ test.py
 trained_model.pth
 dataset.txt
 checkpoints/*
-# Byte-compiled / optimized / DLL files
+
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Distribution / packaging
 dist/
 build/
 *.egg-info/
 
-# Virtual environments
 venv/
 env/
 .env/
 .venv/
 ENV/
 
-# IDE settings
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# Python testing
 .pytest_cache/
 .coverage
 htmlcov/
 
-# Jupyter Notebook
 .ipynb_checkpoints
 
-# Python virtual environment additional files
 .Python
 pip-log.txt
 pip-delete-this-directory.txt
@@ -49,7 +43,6 @@ fish/
 __pycache__/
 *.py[cod]
 
-# Fish shell
 fish_history
 fishd.*
 .config/fish/
