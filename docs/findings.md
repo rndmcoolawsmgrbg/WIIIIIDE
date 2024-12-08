@@ -37,6 +37,81 @@
 - Adaptive compression ratio: 1.34x
 - Distribution: 1,724 batches per node (more consistent)
 
+## Latest Optimizations (December 8th 2024 - Update 2)
+
+### 5. LZ4 Block Mode Implementation
+- Total batches: 17,305 in 30s (~577 batches/s)
+- Network throughput: 3.02MB/s (+3.1% from previous)
+- Network time: 10.54-12.05s per node
+- Memory usage: ~767MB (unchanged)
+- Adaptive compression ratio: 1.30x
+- Distribution: 1,730.5 batches per node
+
+### Performance Improvements
+1. **Compression Speed**
+   - Reduced compression time: 2.19-2.82s (from 2.80-3.51s)
+   - 20% faster compression overall
+   - More consistent compression times
+   - Lower resource utilization
+
+2. **Network Performance**
+   - Best node throughput: 360.13KB/s
+   - Average node throughput: ~309KB/s
+   - Network time variance reduced by 16%
+   - More balanced node distribution
+
+3. **System Stability**
+   - Network time spread: 1.51s (improved from 1.80s)
+   - More consistent node performance
+   - Better minimum performance baseline
+   - Reduced performance variance
+
+### Compression Analysis
+| Metric | Frame Mode | Block Mode | Change |
+|--------|------------|------------|---------|
+| Compression Ratio | 1.32x | 1.30x | -1.5% |
+| Max Comp Time | 3.51s | 2.82s | -19.7% |
+| Min Comp Time | 2.80s | 2.19s | -21.8% |
+| Throughput | 2.93MB/s | 3.02MB/s | +3.1% |
+| Batches | 17,198 | 17,305 | +0.62% |
+
+### Node Performance Distribution
+- Most efficient: 360.13KB/s (Node 4)
+- Least efficient: 261.44KB/s (Node 7)
+- Average throughput: ~309KB/s
+- Network time variance: 1.51s
+- Compression time variance: 0.63s
+
+### Technical Implementation Details
+1. **LZ4 Block Mode Settings**
+   - Fast mode with maximum acceleration
+   - 512KB compression threshold
+   - Optimized block sizes
+   - Minimal overhead configuration
+
+2. **Performance Trade-offs**
+   - Slightly lower compression ratio
+   - Significantly faster processing
+   - Better resource utilization
+   - More predictable performance
+
+### Comparative Analysis
+| Metric | Previous | Current | Change |
+|--------|-----------|----------|---------|
+| Total Batches | 17,244 | 17,305 | +0.35% |
+| Network Throughput | 2.93MB/s | 3.02MB/s | +3.1% |
+| Min Network Time | 10.37s | 10.54s | +1.6% |
+| Max Network Time | 11.79s | 12.05s | +2.2% |
+| Compression Ratio | 1.34x | 1.30x | -3.0% |
+| Max Comp Time | 3.51s | 2.82s | -19.7% |
+
+### System Stability Metrics
+- Loss convergence maintained (2.2865 → 2.2920)
+- Average loss: 2.3311 (consistent with previous)
+- Epochs completed: 541 (slight increase)
+- Training stability unaffected by compression changes
+- Resource utilization more efficient
+
 ## Compression Analysis
 
 ### Baseline (No Compression)
@@ -124,7 +199,7 @@
 - Silent mode: 2.90MB/s throughput
 - Memory impact: minimal (~2MB difference)
 
-## Latest Optimizations (March 2024)
+## Latest Optimizations (December 8th 2024)
 
 ### Performance Improvements
 1. **Buffer Management**

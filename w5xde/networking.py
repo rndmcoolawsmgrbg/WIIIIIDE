@@ -4,7 +4,7 @@ import time
 import os
 import pickle
 import struct
-import zlib
+import lz4.block
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -25,19 +25,27 @@ def send_msg(sock, msg, collect_metrics=False):
     msg_bytes = pickle.dumps(msg, protocol=5, buffer_callback=lambda x: x)
     original_size = len(msg_bytes) if collect_metrics else 0
     
-    # Optimize compression strategy
+    # Optimize compression strategy with LZ4 block mode
     if isinstance(msg, dict) and 'gradients' in msg:
-        if len(msg_bytes) > 512 * 1024:  # Reduced threshold to 512KB
-            # Use fastest compression for large gradients
-            compressed_msg = zlib.compress(msg_bytes, level=1)
+        if len(msg_bytes) > 512 * 1024:  # 512KB threshold
+            # Ultra-fast compression for large gradients
+            compressed_msg = lz4.block.compress(
+                msg_bytes,
+                mode='fast',
+                acceleration=8,  # Maximum speed
+                store_size=False
+            )
             is_compressed = True
         else:
-            # Skip compression for smaller messages
             compressed_msg = msg_bytes
             is_compressed = False
     else:
-        # Use moderate compression for non-gradient data
-        compressed_msg = zlib.compress(msg_bytes, level=3)  # Reduced from level 9
+        # Fast compression for non-gradient data
+        compressed_msg = lz4.block.compress(
+            msg_bytes,
+            mode='fast',
+            acceleration=4  # Balance of speed and compression
+        )
         is_compressed = True
     
     compressed_size = len(compressed_msg) if collect_metrics else 0
@@ -102,9 +110,9 @@ def recv_msg(sock, collect_metrics=False):
         net_time = time.time() - start_net
         start_comp = time.time()
     
-    # Decompress if necessary
+    # Decompress if necessary using LZ4 block mode
     if is_compressed:
-        msg_bytes = zlib.decompress(msg_data)
+        msg_bytes = lz4.block.decompress(msg_data)
     else:
         msg_bytes = msg_data
     
@@ -155,7 +163,13 @@ def secure_send_msg(sock, msg, secure_conn, collect_metrics=False):
         start_comp = time.time()
         pickled_msg = pickle.dumps(msg)
         original_size = len(pickled_msg)
-        compressed_msg = zlib.compress(pickled_msg)
+        # Ultra-fast compression for secure messages
+        compressed_msg = lz4.block.compress(
+            pickled_msg,
+            mode='fast',
+            acceleration=8,  # Maximum speed
+            store_size=False
+        )
         compressed_size = len(compressed_msg)
         encrypted_msg = secure_conn.encrypt_message(compressed_msg)
         comp_time = time.time() - start_comp
@@ -168,7 +182,7 @@ def secure_send_msg(sock, msg, secure_conn, collect_metrics=False):
         
         if collect_metrics:
             return {
-                'sent_bytes': msg_len + 4,  # Include length header
+                'sent_bytes': msg_len + 4,
                 'received_bytes': 0,
                 'comp_time': comp_time,
                 'net_time': net_time,
@@ -195,7 +209,7 @@ def secure_recv_msg(sock, secure_conn, collect_metrics=False):
         
         start_comp = time.time()
         decrypted_msg = secure_conn.decrypt_message(encrypted_msg)
-        msg_bytes = zlib.decompress(decrypted_msg)
+        msg_bytes = lz4.block.decompress(decrypted_msg)
         msg = pickle.loads(msg_bytes)
         comp_time = time.time() - start_comp
         
