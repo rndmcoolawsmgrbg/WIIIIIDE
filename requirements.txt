@@ -1,2 +1,3 @@
 torch
+cryptography
 #transformers for the demo
