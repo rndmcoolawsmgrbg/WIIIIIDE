@@ -37,26 +37,64 @@ More detailed instructions can be found in the [setup guide](docs/setup.md).
 
 ## Using WIIIIIDE: It's Incredibly Simple
 
-WIIIIIDE is designed to be straightforward to use. Here's a few examples to get you started:
+WIIIIIDE is designed to be straightforward to use. Here's a minimal example to get you started:
 
-### Server Setup
+### 1. Define Your Model
+```python
+import torch.nn as nn
+
+class SimpleModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(10, 5),
+            nn.ReLU(),
+            nn.Linear(5, 2)
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+```
+
+### 2. Server Setup
 ```python
 from w5xde import CentralServer
+from torch.utils.data import Dataset
 
-server = CentralServer(model, dataset, batch_size=128, ip="0.0.0.0", port=5555, secure=False)
+# Your dataset should implement the PyTorch Dataset interface
+dataset = YourDataset()  
+model = SimpleModel()
+
+server = CentralServer(
+    model=model,
+    dataset=dataset,
+    batch_size=32,
+    ip="0.0.0.0",  # Use actual IP for remote connections
+    port=5555
+)
 server.start()
 ```
 
-### Client Setup
+### 3. Client Setup
 ```python
 from w5xde import TrainingNode
 
-node = TrainingNode(MODEL_CLASS, secure=False)
-node.train()
+# Create the same model architecture
+model = SimpleModel()
+
+# Optional: Define a callback to monitor training
+def loss_callback(loss, batch_id):
+    print(f"Batch {batch_id}: Loss = {loss:.4f}")
+
+node = TrainingNode(
+    model=model,
+    server_address=('server_ip', 5555),
+    collect_metrics=True
+)
+node.train(loss_callback=loss_callback)
 ```
 
-There you have it! WIIIIIDE will take care of the rest.
-If you require a more detailed example, check out [lstm_node.py](lstm_node.py) and [lstm_server.py](lstm_server.py) for NLP tasks, and [test_training.py](test_training.py) classification (entirely local, for testing pre-production)
+That's it! WIIIIIDE will handle the distributed training process automatically. For a complete working example, check out [test_distributed.py](test_distributed.py).
 
 ## How It Works: Behind the Scenes
 
