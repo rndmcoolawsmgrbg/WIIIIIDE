@@ -1,40 +1,49 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-
-import pickle
-import zlib
-import struct
-
-import socket
-import threading
-import queue
-import logging
-import time
+import pickle, zlib, struct, socket, threading
+import queue, logging, time, os, select, errno
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
-import os
-import select
-import errno
 
-from .networking import configure_socket, send_msg, recv_msg, secure_send_msg, secure_recv_msg, perform_handshake, connect_with_retry
+from .networking import (
+    configure_socket, send_msg, recv_msg, 
+    secure_send_msg, secure_recv_msg, 
+    perform_handshake, connect_with_retry
+)
 from .compression import FastCompression, GradientCompression
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def get_device():
+    """Determine the available computing device."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 class BatchQueue:
-    """Optimized batch queue with prefetching."""
+    """Optimized batch queue with prefetching capabilities."""
+    
     def __init__(self, maxsize=1000):
         self.queue = queue.Queue(maxsize=maxsize)
         self.prefetch_queue = queue.Queue(maxsize=maxsize)
         self.running = True
-        self.prefetch_thread = threading.Thread(target=self._prefetch_worker, daemon=True)
+        
+        # Start prefetch worker thread
+        self.prefetch_thread = threading.Thread(
+            target=self._prefetch_worker, 
+            daemon=True
+        )
         self.prefetch_thread.start()
     
     def _prefetch_worker(self):
+        """Background worker to prefetch batches."""
         while self.running:
             try:
                 batch = self.queue.get(timeout=0.1)
@@ -43,39 +52,39 @@ class BatchQueue:
                 continue
     
     def put(self, batch):
+        """Add a batch to the queue."""
         self.queue.put(batch)
     
     def get(self):
+        """Retrieve a batch, preferably from prefetch queue."""
         try:
             return self.prefetch_queue.get_nowait()
         except queue.Empty:
             return self.queue.get()
     
     def empty(self):
+        """Check if both queues are empty."""
         return self.queue.empty() and self.prefetch_queue.empty()
     
     def qsize(self):
+        """Get total size of both queues."""
         return self.queue.qsize() + self.prefetch_queue.qsize()
 
 class CentralServer:
-    def __init__(self, model, dataset, batch_size=16, ip="localhost", port=5555,
-                 checkpoint_dir="checkpoints", checkpoint_interval=5, secure=False, queue_size=1000):
-        """
-        The class for the central server in a distributed training setup.
-        
-        Args:
-            model: The PyTorch model to train (Required)
-            dataset: The PyTorch Dataset object for training data (Required)
-            batch_size: The batch size for training
-            ip: The IP address to bind the server to
-            port: The port to bind the server to
-            checkpoint_dir: The directory to save model checkpoints
-            checkpoint_interval: The interval in minutes to save checkpoints
-            secure: Whether to enable secure communication
-
-        Methods:
-            start: Start the server and listen for connections
-        """
+    """Central server for distributed training coordination."""
+    
+    def __init__(
+        self, 
+        model, 
+        dataset, 
+        batch_size=16, 
+        ip="localhost", 
+        port=5555,
+        checkpoint_dir="checkpoints", 
+        checkpoint_interval=5, 
+        secure=False, 
+        queue_size=1000
+    ):
         self.model = model
         self.dataset = dataset
         self.batch_size = batch_size
@@ -85,80 +94,82 @@ class CentralServer:
         self.batch_queue = BatchQueue(maxsize=queue_size)
         self.gradient_queue = queue.Queue()
         self.running = True
+
         self.checkpoint_dir = checkpoint_dir
         self.checkpoint_interval = checkpoint_interval
         self.last_checkpoint = time.time()
         self.global_step = 0
+
         self.secure = secure
         self.gradient_compressor = GradientCompression()
 
     def distribute_batches(self):
+        """Distribute batches to worker nodes."""
         logger.info("Starting batch distribution...")
         dataloader = DataLoader(
             self.dataset, 
             batch_size=self.batch_size, 
             shuffle=True
         )
-        logger.info(f"Created Dataloader with {len(dataloader)} batches")
         
+        batch_count = 0
         while self.running:
-            logger.info("Starting new epoch")
             for batch_idx, batch in enumerate(dataloader):
                 if not self.running:
                     break
                 
                 processed_batch = {
-                'batch_id': f"{self.global_step}_batch{batch_idx}",
-                'input_ids': batch['input_ids'].cpu(),
-                'attention_mask': batch.get('attention_mask', None).cpu() if batch.get('attention_mask') is not None else None,
-                'labels': batch.get('labels', None).cpu() if batch.get('labels') is not None else None
-            }
+                    'batch_id': f"{self.global_step}_batch{batch_idx}",
+                    'input_ids': batch['input_ids'].cpu(),
+                    'attention_mask': batch.get('attention_mask', None),
+                    'labels': batch.get('labels', None)
+                }
                 
-                logger.info(f"Putting batch {processed_batch['batch_id']} into queue")
                 self.batch_queue.put(processed_batch)
-                logger.info(f"Queue size: {self.batch_queue.qsize()}")
+                batch_count += 1
                 
     def handle_node(self, conn, addr):
-        """Handle node connection with minimal logging."""
+        """Handle node connection with detailed logging."""
+        logger.info(f"New node connected from {addr}")
         try:
             if self.secure:
                 secure_conn = perform_handshake(conn, is_server=True)
+                logger.info(f"Completed secure handshake with {addr}")
             
             while self.running:
                 if not self.batch_queue.empty():
                     batch = self.batch_queue.get()
+                    logger.info(f"Sending batch {batch['batch_id']} to {addr}")
                     
-                    if self.secure:
-                        secure_send_msg(conn, batch, secure_conn, False)
-                    else:
-                        send_msg(conn, batch, False)
-                    
-                    if self.secure:
-                        gradients_data = secure_recv_msg(conn, secure_conn, False)
-                    else:
-                        gradients_data = recv_msg(conn, False)
+                    try:
+                        if self.secure:
+                            secure_send_msg(conn, batch, secure_conn, False)
+                        else:
+                            send_msg(conn, batch, False)
+                        logger.info(f"Successfully sent batch to {addr}")
+
+                        logger.info(f"Waiting for gradients from {addr}")
+                        if self.secure:
+                            gradients_data = secure_recv_msg(conn, secure_conn, False)
+                        else:
+                            gradients_data = recv_msg(conn, False)
+                            
+                        if gradients_data is None:
+                            logger.warning(f"Received None gradients from {addr}")
+                            break
                         
-                    if gradients_data is None:
+                        logger.info(f"Received gradients for batch {gradients_data.get('batch_id')} from {addr}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error in communication with {addr}: {e}")
                         break
-                    
-                    if gradients_data.get('compressed', False):
-                        gradients = self.gradient_compressor.decompress(
-                            gradients_data['gradients'],
-                            gradients_data['scales']
-                        )
-                    else:
-                        gradients = [
-                            torch.tensor(grad) if grad is not None else None 
-                            for grad in gradients_data['gradients']
-                        ]
-                    
-                    self.gradient_queue.put(gradients)
                 else:
-                    time.sleep(0.1)
+                    time.sleep(0.1)  # Prevent busy waiting
 
         except Exception as e:
-            logger.error(f"Error handling node {addr}: {e}")
+            logger.error(f"Error handling node {addr}: {e}", exc_info=True)
         finally:
+            logger.info(f"Closing connection with {addr}")
             conn.close()
 
     def start(self):
@@ -170,162 +181,133 @@ class CentralServer:
         
         logger.info(f"Server started at {self.ip}:{self.port}")
 
+        # Start batch distribution in a separate thread
         batch_thread = threading.Thread(target=self.distribute_batches, daemon=True)
         batch_thread.start()
+        logger.info("Batch distribution thread started")
         
         try:
             while self.running:
+                logger.info("Waiting for node connections...")
                 conn, addr = server.accept()
+                logger.info(f"Accepted connection from {addr}")
                 thread = threading.Thread(target=self.handle_node, args=(conn, addr))
                 thread.start()
                 self.nodes.append(thread)
+                logger.info(f"Started handler thread for {addr}")
         except KeyboardInterrupt:
+            logger.info("Received shutdown signal")
             self.running = False
+        finally:
+            logger.info("Closing server")
             server.close()
 
 class TrainingNode:
-    def __init__(self, model, server_address=('localhost', 5555), 
-                 secure=False, collect_metrics=False, compress_gradients=False,
-                 batch_gradients=True):
-        """
-        The class for a training node in a distributed training setup.
-
-        Args:
-            model: The PyTorch model to train (Required)
-            server_address: The address of the central server (Default: ('localhost', 5555))
-            secure: Whether to enable secure communication
-            collect_metrics: Whether to collect network metrics
-            compress_gradients: Whether to compress gradients
-            batch_gradients: Whether to batch gradients for compression
-        
-        Methods:
-            train: Start training the model
-        """
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    """Worker node for distributed training."""
+    
+    def __init__(
+        self, 
+        model, 
+        server_address=('localhost', 5555), 
+        secure=False, 
+        collect_metrics=False, 
+        compress_gradients=False, 
+        device=None
+    ):
+        self.device = device or get_device()
         self.model = model.to(self.device)
         self.server_address = server_address
-        self.optimizer = torch.optim.Adam(model.parameters())
-        self.running = True
         self.secure = secure
         self.collect_metrics = collect_metrics
         self.compress_gradients = compress_gradients
-        self.gradient_compressor = GradientCompression() if compress_gradients else None
-        self.batch_gradients = batch_gradients and compress_gradients
-        logger.info(f"Using device: {self.device}")
+        self.gradient_compressor = (
+            GradientCompression() if compress_gradients else None
+        )
+        self.socket = None
+        self.secure_conn = None
+        
+    def connect(self):
+        """Establish connection with the central server."""
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        configure_socket(self.socket)
+        logger.info(f"Connecting to server at {self.server_address}")
+        
+        connect_with_retry(self.socket, self.server_address)
+        if self.secure:
+            self.secure_conn = perform_handshake(self.socket, is_server=False)
+        logger.info("Connected to server.")
+        return self
+    
+    def get_batch(self):
+        """
+        Receive a batch from the server.
+        
+        Returns:
+            tuple: (batch_data, metrics) if collect_metrics=True
+            dict: batch_data if collect_metrics=False
+        """
+        if self.secure:
+            result = secure_recv_msg(self.socket, self.secure_conn, self.collect_metrics)
+        else:
+            result = recv_msg(self.socket, self.collect_metrics)
+        
+        return result
+    
+    def send_gradients(self, gradients, batch_id):
+        """
+        Send computed gradients back to the server.
+        
+        Args:
+            gradients: List of gradient tensors
+            batch_id: ID of the processed batch
+            
+        Returns:
+            dict: Metrics if collect_metrics=True
+            None: if collect_metrics=False
+        """
+        if self.compress_gradients:
+            gradients_data = self._process_gradients(gradients, batch_id)
+        else:
+            gradients_data = {
+                'batch_id': batch_id,
+                'gradients': [
+                    grad.cpu().numpy().tolist() if grad is not None else None
+                    for grad in gradients
+                ],
+                'compressed': False
+            }
+        
+        if self.secure:
+            return secure_send_msg(self.socket, gradients_data, self.secure_conn, self.collect_metrics)
+        else:
+            return send_msg(self.socket, gradients_data, self.collect_metrics)
     
     def _process_gradients(self, raw_grads, batch_id):
-        """Optimized gradient processing."""
+        """Process and optionally compress gradients."""
         if not self.compress_gradients:
             return {
                 'batch_id': batch_id,
                 'gradients': [
-                    grad.cpu().numpy().tolist() if grad is not None else None  # Keep using lists
+                    grad.cpu().numpy().tolist() if grad is not None else None
                     for grad in raw_grads
                 ],
                 'compressed': False
             }
         
-        # Process gradients efficiently
         compressed_grads, scales = self.gradient_compressor.compress(raw_grads, batch_id)
-        
         return {
             'batch_id': batch_id,
             'gradients': [
-                grad.cpu().numpy().tolist() if grad is not None else None  # Keep using lists
+                grad.cpu().numpy().tolist() if grad is not None else None
                 for grad in compressed_grads
             ],
             'scales': scales,
             'compressed': True
         }
     
-    def train(self, loss_callback=None, network_callback=None):
-        """
-        Train the model.
-        
-        Args:
-            loss_callback: Optional callback for loss tracking
-            network_callback: Optional callback for network metrics
-        """
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        configure_socket(sock)
-        logger.info(f"Connecting to server at {self.server_address}")
-        
-        try:
-            connect_with_retry(sock, self.server_address)
-            if self.secure:
-                secure_conn = perform_handshake(sock, is_server=False)
-            
-            while self.running:
-                # Receive batch
-                if self.secure:
-                    result = secure_recv_msg(sock, secure_conn, self.collect_metrics)
-                else:
-                    result = recv_msg(sock, self.collect_metrics)
-                
-                if self.collect_metrics:
-                    batch, recv_metrics = result
-                else:
-                    batch = result
-                    recv_metrics = None
-                
-                if batch is None:
-                    break
-
-                logger.info(f"Received batch {batch['batch_id']}")
-
-                # Process batch and compute gradients
-                input_ids = batch['input_ids'].to(self.device)
-                attention_mask = batch['attention_mask'].to(self.device) if batch.get('attention_mask') is not None else None
-                labels = batch['labels'].to(self.device) if batch.get('labels') is not None else None
-
-                self.optimizer.zero_grad()
-
-                outputs = self.model(input_ids.float())
-                if labels is not None:
-                    loss = nn.CrossEntropyLoss()(outputs, labels)
-                else:
-                    loss = nn.CrossEntropyLoss()(outputs, input_ids.long())
-                
-                loss.backward()
-                
-                if loss_callback:
-                    loss_callback(loss.item(), batch['batch_id'])
-                
-                # Modify the gradient sending part:
-                if self.compress_gradients:
-                    raw_grads = [param.grad for param in self.model.parameters()]
-                    gradients_data = self._process_gradients(raw_grads, batch['batch_id'])
-                else:
-                    gradients_data = {
-                        'batch_id': batch['batch_id'],
-                        'gradients': [
-                            grad.cpu().numpy().tolist() if grad is not None else None  # Keep using lists
-                            for grad in [param.grad for param in self.model.parameters()]
-                        ],
-                        'compressed': False
-                    }
-                
-                logger.info(f"Sending gradients for batch {batch['batch_id']}")
-                if self.secure:
-                    send_metrics = secure_send_msg(sock, gradients_data, secure_conn, self.collect_metrics)
-                else:
-                    send_metrics = send_msg(sock, gradients_data, self.collect_metrics)
-                
-                logger.info(f"Training loss: {loss.item():.4f}")
-                
-                # Report network metrics if enabled and callbacks provided
-                if self.collect_metrics and network_callback and recv_metrics and send_metrics:
-                    network_callback(
-                        send_metrics['sent_bytes'],
-                        recv_metrics['received_bytes'],
-                        recv_metrics['comp_time'] + send_metrics['comp_time'],
-                        recv_metrics['net_time'] + send_metrics['net_time'],
-                        recv_metrics['original_size'] + send_metrics['original_size'],
-                        recv_metrics['compressed_size'] + send_metrics['compressed_size']
-                    )
-                
-        except Exception as e:
-            logger.error(f"Error in training node: {e}", exc_info=True)
-        finally:
-            logger.info("Closing connection")
-            sock.close()
+    def close(self):
+        """Close the connection with the server."""
+        if self.socket:
+            self.socket.close()
+            self.socket = None
+            self.secure_conn = None
