@@ -4,3 +4,4 @@ transformers
 dash
 dash-bootstrap-components
 plotly
+lz4
