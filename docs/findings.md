@@ -111,3 +111,58 @@
    - Batch aggregation strategies
    - Protocol optimization
    - Header reduction techniques 
+
+## What Didn't Work
+
+1. **Non-Blocking Socket Attempts**
+   - Full non-blocking mode caused connection issues
+   - Complex error handling added overhead
+   - Benefits didn't outweigh the complexity
+   - Solution: Use blocking mode with selective non-blocking for connections
+
+2. **Aggressive Compression**
+   - Higher compression ratios (>1.88x) increased CPU usage
+   - Compression level 9 for all data was too slow
+   - Memory usage increased with larger compression buffers
+   - Solution: Adaptive compression based on data size
+
+3. **Small Buffer Sizes**
+   - 1MB buffers were insufficient
+   - 16MB buffers didn't show additional benefit over 8MB
+   - Very small chunks (<64KB) increased system calls
+   - Solution: 8MB buffers with 256KB chunks optimal
+
+4. **Logging Overhead**
+   - Verbose logging reduced throughput by 24%
+   - Debug-level logging in production was costly
+   - Real-time metrics impacted performance
+   - Solution: Three-tier logging system (silent, normal, verbose)
+
+## Historical Performance Data
+
+### Logging Impact Study
+- Verbose mode: 1.67MB/s throughput
+- Normal mode: 1.85MB/s throughput
+- Silent mode: 2.07MB/s throughput
+- Memory impact: minimal (~2MB difference)
+
+### Buffer Size Testing
+1. **1MB Buffers**
+   - Throughput: 1.2MB/s
+   - High system call overhead
+   - Network bottlenecks
+
+2. **4MB Buffers**
+   - Throughput: 1.67MB/s
+   - Better performance
+   - Good stability
+
+3. **8MB Buffers**
+   - Throughput: 2.90MB/s
+   - Optimal performance
+   - Best stability
+
+4. **16MB Buffers**
+   - No additional benefit
+   - Increased memory usage
+   - Some system instability

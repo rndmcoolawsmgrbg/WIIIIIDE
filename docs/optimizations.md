@@ -90,3 +90,68 @@ def recvall(sock, n):
 3. Memory-mapped batch handling
 4. Network condition-based adaptation
 5. Advanced load balancing strategies
+
+## Failed Optimization Attempts
+
+### Vectored I/O Implementation
+```python
+try:
+    while True:
+        sent = sock.send(header + compressed_msg)
+        if sent == len(header) + msg_len:
+            break
+        header = b''
+        compressed_msg = compressed_msg[sent - len(header):]
+except BlockingIOError:
+    select.select([], [sock], [])
+```
+**Impact:**
+- Added complexity
+- Unreliable error handling
+- No significant performance gain
+- Removed in favor of simpler approach
+
+### Maximum Compression
+```python
+# Attempt to maximize compression
+compressed_msg = zlib.compress(msg_bytes, level=9)
+```
+**Impact:**
+- Higher CPU usage
+- Longer processing times
+- Minimal size benefit
+- Replaced with adaptive compression
+
+### Small Chunk Sizes
+```python
+# Initial attempt with small chunks
+chunk_size = min(16 * 1024, n)  # 16KB chunks
+```
+**Impact:**
+- Too many system calls
+- Reduced throughput
+- Higher CPU usage
+- Increased to 256KB for better performance
+
+## Evolution of Optimizations
+
+### Version 1.0
+- Basic socket configuration
+- Fixed compression
+- Simple logging
+- 1MB buffers
+- Performance: 1.2MB/s
+
+### Version 2.0
+- Enhanced socket settings
+- Two-level compression
+- Improved logging
+- 4MB buffers
+- Performance: 1.67MB/s
+
+### Version 3.0
+- TCP optimizations
+- Adaptive compression
+- Three-tier logging
+- 8MB buffers
+- Performance: 2.90MB/s
