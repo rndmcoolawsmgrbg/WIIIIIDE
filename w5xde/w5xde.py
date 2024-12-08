@@ -11,7 +11,8 @@ import base64
 from .networking import (
     configure_socket, send_msg, recv_msg, 
     secure_send_msg, secure_recv_msg, 
-    perform_handshake, connect_with_retry
+    perform_handshake, connect_with_retry,
+    configure_server_socket
 )
 from .compression import FastCompression, GradientCompression
 
@@ -83,7 +84,8 @@ class CentralServer:
         checkpoint_dir="checkpoints", 
         checkpoint_interval=5, 
         secure=False, 
-        queue_size=1000
+        queue_size=1000,
+        criterion=None
     ):
         self.model = model
         self.dataset = dataset
@@ -94,6 +96,7 @@ class CentralServer:
         self.batch_queue = BatchQueue(maxsize=queue_size)
         self.gradient_queue = queue.Queue()
         self.running = True
+        self.criterion = criterion or nn.CrossEntropyLoss()
 
         self.checkpoint_dir = checkpoint_dir
         self.checkpoint_interval = checkpoint_interval
@@ -175,7 +178,7 @@ class CentralServer:
     def start(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        configure_socket(server)
+        configure_server_socket(server)
         server.bind((self.ip, self.port))
         server.listen(5)
         
@@ -188,13 +191,25 @@ class CentralServer:
         
         try:
             while self.running:
-                logger.info("Waiting for node connections...")
-                conn, addr = server.accept()
-                logger.info(f"Accepted connection from {addr}")
-                thread = threading.Thread(target=self.handle_node, args=(conn, addr))
-                thread.start()
-                self.nodes.append(thread)
-                logger.info(f"Started handler thread for {addr}")
+                try:
+                    # Non-blocking accept with select
+                    readable, _, _ = select.select([server], [], [], 1.0)  # 1 second timeout
+                    if readable:
+                        conn, addr = server.accept()
+                        configure_socket(conn)  # Configure client connection
+                        logger.info(f"Accepted connection from {addr}")
+                        thread = threading.Thread(target=self.handle_node, args=(conn, addr))
+                        thread.start()
+                        self.nodes.append(thread)
+                        logger.info(f"Started handler thread for {addr}")
+                except socket.error as e:
+                    if e.errno != errno.EAGAIN and e.errno != errno.EWOULDBLOCK:
+                        logger.error(f"Socket error: {e}")
+                        break
+                    continue
+                except Exception as e:
+                    logger.error(f"Error accepting connection: {e}")
+                    continue
         except KeyboardInterrupt:
             logger.info("Received shutdown signal")
             self.running = False
@@ -211,8 +226,11 @@ class TrainingNode:
         server_address=('localhost', 5555), 
         secure=False, 
         collect_metrics=False, 
-        compress_gradients=False, 
-        device=None
+        compress_gradients=False,
+        device=None,
+        criterion=None,
+        optimizer_class=torch.optim.Adam,
+        optimizer_kwargs=None
     ):
         self.device = device or get_device()
         self.model = model.to(self.device)
@@ -220,11 +238,12 @@ class TrainingNode:
         self.secure = secure
         self.collect_metrics = collect_metrics
         self.compress_gradients = compress_gradients
-        self.gradient_compressor = (
-            GradientCompression() if compress_gradients else None
-        )
+        self.gradient_compressor = GradientCompression() if compress_gradients else None
         self.socket = None
         self.secure_conn = None
+        self.criterion = criterion or nn.CrossEntropyLoss()
+        self.optimizer_class = optimizer_class
+        self.optimizer_kwargs = optimizer_kwargs or {}
         
     def connect(self):
         """Establish connection with the central server."""
@@ -311,3 +330,90 @@ class TrainingNode:
             self.socket.close()
             self.socket = None
             self.secure_conn = None
+
+    def train(self, loss_callback=None, network_callback=None):
+        """Train the model using batches from the server."""
+        try:
+            self.connect()
+            optimizer = self.optimizer_class(self.model.parameters(), **self.optimizer_kwargs)
+
+            while True:
+                try:
+                    result = self.get_batch()
+                    
+                    if result is None:
+                        logger.warning("Received None result from get_batch")
+                        break
+                    
+                    if self.collect_metrics:
+                        batch, metrics = result
+                        if batch is None:
+                            logger.warning("Received None batch with metrics")
+                            break
+                        
+                        if network_callback and metrics:
+                            network_callback(
+                                sent_bytes=metrics.get('sent_bytes', 0),
+                                received_bytes=metrics.get('received_bytes', 0),
+                                comp_time=metrics.get('comp_time', 0),
+                                net_time=metrics.get('net_time', 0),
+                                original_size=metrics.get('original_size', 0),
+                                compressed_size=metrics.get('compressed_size', 0)
+                            )
+                    else:
+                        batch = result
+                        if batch is None:
+                            logger.warning("Received None batch")
+                            break
+
+                    # Process batch
+                    input_ids = batch['input_ids'].to(self.device)
+                    attention_mask = batch.get('attention_mask')
+                    if attention_mask is not None:
+                        attention_mask = attention_mask.to(self.device)
+                    labels = batch.get('labels')
+                    if labels is not None:
+                        labels = labels.to(self.device)
+
+                    # Forward pass
+                    optimizer.zero_grad()
+                    outputs = self.model(input_ids)
+                    
+                    # Calculate loss
+                    if labels is not None:
+                        loss = self.criterion(outputs, labels)
+                    else:
+                        loss = self.criterion(outputs, input_ids.long())
+
+                    # Backward pass
+                    loss.backward()
+
+                    # Report loss if callback provided
+                    if loss_callback:
+                        loss_callback(loss.item(), batch['batch_id'])
+
+                    # Get gradients
+                    gradients = [param.grad for param in self.model.parameters()]
+                    
+                    # Send gradients back to server
+                    metrics = self.send_gradients(gradients, batch['batch_id'])
+                    
+                    if self.collect_metrics and network_callback and metrics:
+                        network_callback(
+                            sent_bytes=metrics.get('sent_bytes', 0),
+                            received_bytes=metrics.get('received_bytes', 0),
+                            comp_time=metrics.get('comp_time', 0),
+                            net_time=metrics.get('net_time', 0),
+                            original_size=metrics.get('original_size', 0),
+                            compressed_size=metrics.get('compressed_size', 0)
+                        )
+
+                except Exception as e:
+                    logger.error(f"Error in training iteration: {e}")
+                    break
+
+        except Exception as e:
+            logger.error(f"Error in training loop: {e}", exc_info=True)
+            raise
+        finally:
+            self.close()
