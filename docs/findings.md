@@ -1,8 +1,27 @@
 # Performance Analysis and Findings
 
-## Latest Performance Analysis
+## System Evolution Timeline
 
-### Current Best Performance
+### 1. Early System (Initial Release)
+- Total batches: 2,733 in 30s (~91 batches/s)
+- Network throughput: 326KB/s
+- Network time: ~24s per node
+- Memory usage: 709.11MB
+- Training progress: 86 epochs/30s
+- Basic features:
+  - 512KB buffers
+  - No compression
+  - Simple logging
+
+### 2. Standard Configuration
+- Total batches: 13,764 in 30s (~459 batches/s)
+- Network throughput: 1.67MB/s
+- Network time: ~14s per node
+- Memory usage: 755.39MB
+- Default compression ratio: 1.88x (pickle/zlib)
+- Distribution: 1,196-1,617 batches per node
+
+### 3. Current Implementation
 - Total batches: 17,151 in 30s (~572 batches/s)
 - Network throughput: 2.90MB/s
 - Network time: 10.40-12.15s per node
@@ -10,61 +29,57 @@
 - Adaptive compression ratio: 1.35x
 - Distribution: 1,449-2,069 batches per node
 
-### Performance Evolution
-1. **Initial Implementation**
-   - Throughput: 1.67MB/s
-   - Basic compression
-   - Fixed buffer sizes
+## Compression Analysis
 
-2. **First Optimization**
-   - Throughput: 2.07MB/s
-   - Improved logging
-   - Larger buffers
+### Baseline (No Compression)
+- Total batches: 13,866 in 30s (~462 batches/s)
+- Network throughput: 1.68MB/s
+- Network time: ~13.7s per node
+- Memory usage: 754.91MB
+- Default pickle/zlib ratio: 1.88x
 
-3. **Current Implementation**
-   - Throughput: 2.90MB/s
-   - Adaptive compression
-   - Optimized buffers
+### With Gradient Compression
+- Total batches: 10,339 in 30s (~344 batches/s)
+- Network throughput: 834.88KB/s
+- Network time: ~12.7s per node
+- Memory usage: 804.97MB
+- Compression ratio: 2.02x
 
-## Critical Findings
+### Training Stability Metrics
+- Loss metrics consistent across methods
+- Average loss: ~2.33 for both approaches
+- Training convergence unaffected
+- Stable gradient updates maintained
 
-1. **Compression Strategy**
-   - Selective compression highly effective
-   - 1MB threshold optimal for current workload
-   - Lower compression ratio (1.35x) but faster overall
-   - 40% throughput improvement
+## Performance Characteristics
 
-2. **Network Optimization**
-   - 8MB buffer size optimal
-   - 256KB chunk size ideal
-   - TCP_QUICKACK significant
-   - 67% faster per-node performance
+### Network Performance
+- Optimal throughput with default configuration
+- Network operations well-balanced across nodes
+- Consistent performance across runs
+- TCP optimizations highly effective
+- Buffer sizes optimized (8MB current)
 
-3. **Resource Utilization**
-   - Memory usage stable at ~768MB
-   - Efficient buffer management
-   - Better CPU utilization
-   - Improved load distribution
+### Resource Utilization
+- Memory usage stable (~755-768MB)
+- Efficient buffer management
+- CPU overhead minimized
+- Even load distribution
+- Linear scaling maintained
 
-4. **Scaling Characteristics**
-   - Linear scaling maintained
-   - More consistent per-node performance
-   - Better throughput distribution
-   - Reliable batch handling
-
-## Performance Bottlenecks
-
+### System Bottlenecks
 1. **Network Operations**
    - Network time: 10.40-12.15s per node
-   - Main bottleneck now data transfer
+   - Main bottleneck is data transfer
    - Buffer sizes optimized
-   - Room for further protocol optimization
+   - Room for protocol optimization
 
 2. **Compression Operations**
    - Compression time: 2.73-3.41s per node
    - Adaptive strategy effective
    - Balance achieved between speed and size
-   - Potential for parallel processing
+   - Initial compression tests showed higher memory usage (~50MB increase)
+   - Higher compression ratios (2.02x) didn't justify overhead
 
 3. **System Resources**
    - Memory usage optimized
@@ -72,79 +87,7 @@
    - Minimal overhead
    - Stable performance
 
-## Best Practices
-
-1. **Production Deployment**
-   - Use adaptive compression
-   - 8MB buffer sizes
-   - 256KB chunk sizes
-   - Monitor compression ratios
-
-2. **Network Configuration**
-   - Enable TCP_NODELAY
-   - Use TCP_QUICKACK
-   - Optimize buffer sizes
-   - Monitor network conditions
-
-3. **Resource Planning**
-   - Account for ~77MB per node
-   - Plan for 300-350KB/s per node
-   - Consider compression overhead
-   - Monitor system resources
-
-## Future Research Areas
-
-1. **Dynamic Optimization**
-   - Adaptive compression thresholds
-   - Network-aware buffer sizing
-   - Dynamic chunk size adjustment
-   - Load-based optimization
-
-2. **Resource Management**
-   - Parallel compression
-   - Memory-mapped operations
-   - Advanced load balancing
-   - Resource prediction
-
-3. **Protocol Improvements**
-   - Custom compression algorithms
-   - Batch aggregation strategies
-   - Protocol optimization
-   - Header reduction techniques 
-
-## What Didn't Work
-
-1. **Non-Blocking Socket Attempts**
-   - Full non-blocking mode caused connection issues
-   - Complex error handling added overhead
-   - Benefits didn't outweigh the complexity
-   - Solution: Use blocking mode with selective non-blocking for connections
-
-2. **Aggressive Compression**
-   - Higher compression ratios (>1.88x) increased CPU usage
-   - Compression level 9 for all data was too slow
-   - Memory usage increased with larger compression buffers
-   - Solution: Adaptive compression based on data size
-
-3. **Small Buffer Sizes**
-   - 1MB buffers were insufficient
-   - 16MB buffers didn't show additional benefit over 8MB
-   - Very small chunks (<64KB) increased system calls
-   - Solution: 8MB buffers with 256KB chunks optimal
-
-4. **Logging Overhead**
-   - Verbose logging reduced throughput by 24%
-   - Debug-level logging in production was costly
-   - Real-time metrics impacted performance
-   - Solution: Three-tier logging system (silent, normal, verbose)
-
 ## Historical Performance Data
-
-### Logging Impact Study
-- Verbose mode: 1.67MB/s throughput
-- Normal mode: 1.85MB/s throughput
-- Silent mode: 2.07MB/s throughput
-- Memory impact: minimal (~2MB difference)
 
 ### Buffer Size Testing
 1. **1MB Buffers**
@@ -166,3 +109,9 @@
    - No additional benefit
    - Increased memory usage
    - Some system instability
+
+### Logging Impact Study
+- Verbose mode: 1.67MB/s throughput
+- Normal mode: 2.90MB/s throughput
+- Silent mode: 2.90MB/s throughput
+- Memory impact: minimal (~2MB difference)
