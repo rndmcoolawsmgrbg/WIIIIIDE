@@ -431,6 +431,24 @@ def configure_socket(sock):
                 sock.setsockopt(socket.IPPROTO_TCP, 25, 16384)
             except (AttributeError, OSError):
                 pass
+                
+        elif sys.platform == 'win32':
+            try:
+                # Windows specific optimizations
+                # Disable Nagle's algorithm
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                
+                # Enable keep-alive with shorter timeout
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                
+                # TCP_FASTOPEN is supported on Windows 10 1607 and later
+                try:
+                    # TCP_FASTOPEN (15)
+                    sock.setsockopt(socket.IPPROTO_TCP, 15, 1)
+                except (AttributeError, OSError):
+                    pass
+            except (AttributeError, OSError):
+                pass
 
     except OSError as e:
         logger.error(f"Socket configuration error: {e}, Ignoring")
