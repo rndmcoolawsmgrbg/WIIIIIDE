@@ -355,12 +355,8 @@ class CentralServer:
                     
                     # Convert received gradients back to tensors
                     if gradients_data.get('compressed', False):
-                        compressed_grads = [
-                            torch.tensor(grad, dtype=torch.int8) if grad is not None else None 
-                            for grad in gradients_data['gradients']
-                        ]
                         gradients = self.gradient_compressor.decompress(
-                            compressed_grads,
+                            gradients_data['gradients'],  # Now contains compressed bytes
                             gradients_data['scales']
                         )
                     else:
@@ -459,8 +455,12 @@ class GradientCompression:
                 buffer['temp'].mul_(scale / self.scale_factor)
                 torch.sub(grad.to(self.device), buffer['temp'], out=buffer['error'])
                 
-                # Efficient CPU transfer
-                compressed_grads.append(buffer['quantized'].cpu())
+                # Apply fast compression to quantized data
+                quantized_data = buffer['quantized'].cpu()
+                compressed_data = self.compressor.compress(quantized_data.numpy().tobytes())
+                
+                # Store compressed form
+                compressed_grads.append(compressed_data)
                 scales.append(scale.item())
         
         return compressed_grads, scales
@@ -469,13 +469,17 @@ class GradientCompression:
         """Fast decompression."""
         gradients = []
         
-        for grad, scale in zip(compressed_grads, scales):
-            if grad is None:
+        for grad_bytes, scale in zip(compressed_grads, scales):
+            if grad_bytes is None:
                 gradients.append(None)
                 continue
             
             with torch.no_grad():
-                # Single operation decompression
+                # Decompress bytes back to tensor
+                decompressed_bytes = self.compressor.decompress(grad_bytes)
+                grad = torch.frombuffer(decompressed_bytes, dtype=torch.int8)
+                
+                # Convert to float and scale
                 dequantized = grad.to(self.device).float().mul_(scale / self.scale_factor)
                 gradients.append(dequantized)
         
@@ -613,3 +617,96 @@ class TrainingNode:
         finally:
             logger.info("Closing connection")
             sock.close()
+
+class FastCompression:
+    """Fast compression optimized for gradient data using LZ4-like algorithm."""
+    
+    def __init__(self, window_size=64*1024):
+        self.window_size = window_size
+        self.hash_table = {}
+    
+    def _hash(self, data, pos):
+        """4-byte rolling hash."""
+        if pos + 4 > len(data):
+            return 0
+        return (data[pos] | 
+                (data[pos + 1] << 8) | 
+                (data[pos + 2] << 16) | 
+                (data[pos + 3] << 24))
+    
+    def compress(self, data: bytes) -> bytes:
+        """Fast compression optimized for numerical data."""
+        if len(data) < 4:
+            return data
+        
+        compressed = bytearray()
+        pos = 0
+        self.hash_table.clear()
+        
+        while pos < len(data):
+            # Look for matches
+            best_len = 3  # Minimum match length
+            best_offset = 0
+            
+            if pos + best_len <= len(data):
+                hash_val = self._hash(data, pos)
+                if hash_val in self.hash_table:
+                    prev_pos = self.hash_table[hash_val]
+                    offset = pos - prev_pos
+                    
+                    if offset <= self.window_size:
+                        # Find match length
+                        match_len = 0
+                        while (pos + match_len < len(data) and 
+                               prev_pos + match_len < pos and 
+                               data[pos + match_len] == data[prev_pos + match_len] and
+                               match_len < 255):
+                            match_len += 1
+                        
+                        if match_len >= best_len:
+                            best_len = match_len
+                            best_offset = offset
+            
+            # Store position in hash table
+            if pos + 4 <= len(data):
+                self.hash_table[hash_val] = pos
+            
+            # Output token
+            if best_offset:
+                # Match found
+                token = (0x80 | (best_len - 3))  # Set high bit for match
+                compressed.append(token)
+                # Store offset in 2 bytes, little endian
+                compressed.extend(best_offset.to_bytes(2, 'little'))
+                pos += best_len
+            else:
+                # Literal
+                compressed.append(data[pos])
+                pos += 1
+        
+        return bytes(compressed)
+    
+    def decompress(self, data: bytes) -> bytes:
+        """Fast decompression."""
+        if len(data) < 4:
+            return data
+        
+        decompressed = bytearray()
+        pos = 0
+        
+        while pos < len(data):
+            token = data[pos]
+            pos += 1
+            
+            if token & 0x80:  # Match
+                length = (token & 0x7F) + 3
+                offset = int.from_bytes(data[pos:pos+2], 'little')
+                pos += 2
+                
+                start = len(decompressed) - offset
+                for i in range(length):
+                    decompressed.append(decompressed[start + i])
+            else:  # Literal
+                decompressed.append(token)
+        
+        return bytes(decompressed)
