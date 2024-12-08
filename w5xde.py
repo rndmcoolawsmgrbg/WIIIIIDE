@@ -295,6 +295,7 @@ class CentralServer:
         self.last_checkpoint = time.time()
         self.global_step = 0
         self.secure = secure
+        self.gradient_compressor = GradientCompression()  # For decompression
 
     def distribute_batches(self):
         logger.info("Starting batch distribution...")
@@ -353,10 +354,20 @@ class CentralServer:
                         break
                     
                     # Convert received gradients back to tensors
-                    gradients = [
-                        torch.tensor(grad) if grad is not None else None 
-                        for grad in gradients_data['gradients']
-                    ]
+                    if gradients_data.get('compressed', False):
+                        compressed_grads = [
+                            torch.tensor(grad, dtype=torch.int8) if grad is not None else None 
+                            for grad in gradients_data['gradients']
+                        ]
+                        gradients = self.gradient_compressor.decompress(
+                            compressed_grads,
+                            gradients_data['scales']
+                        )
+                    else:
+                        gradients = [
+                            torch.tensor(grad) if grad is not None else None 
+                            for grad in gradients_data['gradients']
+                        ]
                     
                     logger.info(f"Received gradients for batch {gradients_data['batch_id']}")
                     self.gradient_queue.put(gradients)
@@ -392,8 +403,88 @@ class CentralServer:
             self.running = False
             server.close()
 
+class GradientCompression:
+    def __init__(self, bits=8, scale_method='dynamic'):
+        self.bits = bits
+        self.scale_method = scale_method
+        self.max_val = 2**(bits-1) - 1
+        self.min_val = -(2**(bits-1))
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Pre-compute constants
+        self.scale_factor = float(self.max_val)
+        
+        # Reusable buffers
+        self.buffers = {}
+    
+    def _get_buffer(self, shape, grad_id):
+        key = (grad_id, shape)
+        if key not in self.buffers:
+            self.buffers[key] = {
+                'error': torch.zeros(shape, dtype=torch.float32, device=self.device),
+                'quantized': torch.zeros(shape, dtype=torch.int8, device=self.device),
+                'temp': torch.zeros(shape, dtype=torch.float32, device=self.device)
+            }
+        return self.buffers[key]
+    
+    def compress(self, gradients, grad_id=None):
+        """Fast compression with minimal memory operations."""
+        compressed_grads = []
+        scales = []
+        
+        for i, grad in enumerate(gradients):
+            if grad is None:
+                compressed_grads.append(None)
+                scales.append(None)
+                continue
+            
+            buffer = self._get_buffer(grad.shape, f"{grad_id}_{i}")
+            
+            with torch.no_grad():
+                # Move to device and add error in single operation
+                torch.add(grad.to(self.device), buffer['error'], out=buffer['temp'])
+                
+                # Fast scale calculation
+                if self.scale_method == 'dynamic':
+                    scale = buffer['temp'].abs().max().clamp_(min=1e-8)
+                else:
+                    scale = 1.0
+                
+                # Quantize in-place
+                buffer['temp'].div_(scale).mul_(self.scale_factor)
+                buffer['temp'].round_().clamp_(self.min_val, self.max_val)
+                buffer['quantized'].copy_(buffer['temp'])
+                
+                # Update error feedback
+                buffer['temp'].mul_(scale / self.scale_factor)
+                torch.sub(grad.to(self.device), buffer['temp'], out=buffer['error'])
+                
+                # Efficient CPU transfer
+                compressed_grads.append(buffer['quantized'].cpu())
+                scales.append(scale.item())
+        
+        return compressed_grads, scales
+    
+    def decompress(self, compressed_grads, scales):
+        """Fast decompression."""
+        gradients = []
+        
+        for grad, scale in zip(compressed_grads, scales):
+            if grad is None:
+                gradients.append(None)
+                continue
+            
+            with torch.no_grad():
+                # Single operation decompression
+                dequantized = grad.to(self.device).float().mul_(scale / self.scale_factor)
+                gradients.append(dequantized)
+        
+        return gradients
+
 class TrainingNode:
-    def __init__(self, model, server_address=('localhost', 5555), secure=False, collect_metrics=False):
+    def __init__(self, model, server_address=('localhost', 5555), 
+                 secure=False, collect_metrics=False, compress_gradients=False,
+                 batch_gradients=True):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
         self.server_address = server_address
@@ -401,7 +492,35 @@ class TrainingNode:
         self.running = True
         self.secure = secure
         self.collect_metrics = collect_metrics
+        self.compress_gradients = compress_gradients
+        self.gradient_compressor = GradientCompression() if compress_gradients else None
+        self.batch_gradients = batch_gradients and compress_gradients
         logger.info(f"Using device: {self.device}")
+    
+    def _process_gradients(self, raw_grads, batch_id):
+        """Optimized gradient processing."""
+        if not self.compress_gradients:
+            return {
+                'batch_id': batch_id,
+                'gradients': [
+                    grad.cpu().numpy().tolist() if grad is not None else None  # Keep using lists
+                    for grad in raw_grads
+                ],
+                'compressed': False
+            }
+        
+        # Process gradients efficiently
+        compressed_grads, scales = self.gradient_compressor.compress(raw_grads, batch_id)
+        
+        return {
+            'batch_id': batch_id,
+            'gradients': [
+                grad.cpu().numpy().tolist() if grad is not None else None  # Keep using lists
+                for grad in compressed_grads
+            ],
+            'scales': scales,
+            'compressed': True
+        }
     
     def train(self, loss_callback=None, network_callback=None):
         """
@@ -456,14 +575,19 @@ class TrainingNode:
                 if loss_callback:
                     loss_callback(loss.item(), batch['batch_id'])
                 
-                # Send gradients
-                gradients_data = {
-                    'batch_id': batch['batch_id'],
-                    'gradients': [
-                        grad.cpu().numpy().tolist() if grad is not None else None 
-                        for grad in [param.grad for param in self.model.parameters()]
-                    ]
-                }
+                # Modify the gradient sending part:
+                if self.compress_gradients:
+                    raw_grads = [param.grad for param in self.model.parameters()]
+                    gradients_data = self._process_gradients(raw_grads, batch['batch_id'])
+                else:
+                    gradients_data = {
+                        'batch_id': batch['batch_id'],
+                        'gradients': [
+                            grad.cpu().numpy().tolist() if grad is not None else None  # Keep using lists
+                            for grad in [param.grad for param in self.model.parameters()]
+                        ],
+                        'compressed': False
+                    }
                 
                 logger.info(f"Sending gradients for batch {batch['batch_id']}")
                 if self.secure:
