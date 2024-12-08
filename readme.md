@@ -80,7 +80,6 @@ flowchart TD
 
 We're transparent about where WIIIIIDE is right now:
 
-- **Central Coordination**: Currently relies on a single central server.
 - **Network Dependency**: Requires a stable, high-bandwidth connection.
 - **Security Considerations**: No built-in encryption yet - best used on secure networks. (We're going to tackle this soon with enough interest!)
 - **Resource Management**: Recommended to use on dedicated servers.
