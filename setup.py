@@ -21,5 +21,6 @@ setup(
         "dash",
         "dash-bootstrap-components",
         "plotly",
+        "lz4"
     ]
 )
