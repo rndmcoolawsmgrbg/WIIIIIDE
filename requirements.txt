@@ -1,3 +1,6 @@
 torch
 cryptography
 transformers
+dash
+dash-bootstrap-components
+plotly
