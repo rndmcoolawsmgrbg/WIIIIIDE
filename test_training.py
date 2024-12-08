@@ -6,6 +6,8 @@ from w5xde import CentralServer, TrainingNode
 import logging
 from datetime import datetime
 import queue
+import os
+import socket
 
 # Set logging level to see more details
 logging.basicConfig(
@@ -167,37 +169,58 @@ class TrainingStats:
         logger.info(f"Memory Usage: {format_size(get_process_memory())}")
         logger.info("=" * 50)
 
-def start_node(model, node_id):
-    def loss_callback(loss, batch_id):
-        stats.add_loss(loss, batch_id, node_id)
-        
-    def network_callback(sent, received, comp_time, net_time, orig_size, comp_size):
-        stats.add_network_stats(node_id, sent, received, comp_time, net_time, orig_size, comp_size)
-        
-    node = TrainingNode(
-        model=model,
-        server_address=('localhost', 5555),
-        secure=False,
-        collect_metrics=True
-    )
-    node.train(loss_callback, network_callback)
-
-def get_user_input(prompt):
+def get_user_input(prompt, options=None):
+    """Enhanced user input handler."""
     while True:
         try:
             response = input(prompt).lower().strip()
-            if response in ['y', 'n']:
-                return response == 'y'
-            print("Please enter 'y' or 'n'")
+            if options:
+                if response in options:
+                    return response
+                print(f"Please enter one of: {', '.join(options)}")
+            else:
+                if response in ['y', 'n']:
+                    return response == 'y'
+                print("Please enter 'y' or 'n'")
         except KeyboardInterrupt:
             return False
 
-def run_training_session(num_nodes):
+def cleanup_ports():
+    """Force cleanup of ports in use."""
+    import socket
+    import time
+    
+    # Common ports used by the server
+    ports = [5555]
+    
+    for port in ports:
+        try:
+            # Create a temporary socket to force port release
+            temp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            temp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            temp_socket.bind(('localhost', port))
+            temp_socket.close()
+        except Exception:
+            # If we can't bind, wait a moment and try again
+            time.sleep(1)
+            try:
+                temp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                temp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                temp_socket.bind(('localhost', port))
+                temp_socket.close()
+            except Exception as e:
+                logger.error(f"Could not cleanup port {port}: {e}")
+
+def run_training_session(num_nodes, use_compression):
     try:
+        # Clean up any existing ports first
+        cleanup_ports()
+        
         # Set random seed for reproducibility
         torch.manual_seed(42)
         
         logger.info(f"Initializing training setup with {num_nodes} nodes...")
+        logger.info(f"Gradient compression: {'enabled' if use_compression else 'disabled'}")
         
         # Create a simple model
         input_size = 10
@@ -221,7 +244,7 @@ def run_training_session(num_nodes):
         server_thread = threading.Thread(target=server.start)
         server_thread.start()
         
-        time.sleep(2)
+        time.sleep(2)  # Give server time to start
         
         # Initialize global stats
         global stats
@@ -234,7 +257,7 @@ def run_training_session(num_nodes):
             node_model = SimpleModel(input_size=input_size)
             thread = threading.Thread(
                 target=start_node, 
-                args=(node_model, i)
+                args=(node_model, i, use_compression)
             )
             node_threads.append(thread)
         
@@ -254,9 +277,13 @@ def run_training_session(num_nodes):
             logger.info("Shutting down...")
             server.running = False
             
+            # Clean shutdown of threads
             for thread in node_threads:
                 thread.join(timeout=2)
             server_thread.join(timeout=2)
+            
+            # Force cleanup
+            cleanup_ports()
             
             stats.print_summary()
             
@@ -265,7 +292,25 @@ def run_training_session(num_nodes):
 
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
+        cleanup_ports()
         return False
+
+def start_node(model, node_id, use_compression):
+    def loss_callback(loss, batch_id):
+        stats.add_loss(loss, batch_id, node_id)
+        
+    def network_callback(sent, received, comp_time, net_time, orig_size, comp_size):
+        stats.add_network_stats(node_id, sent, received, comp_time, net_time, orig_size, comp_size)
+        
+    node = TrainingNode(
+        model=model,
+        server_address=('localhost', 5555),
+        secure=False,
+        collect_metrics=True,
+        compress_gradients=use_compression,
+        batch_gradients=True  # Enable batch gradient processing
+    )
+    node.train(loss_callback, network_callback)
 
 def main():
     try:
@@ -278,23 +323,28 @@ def main():
             except ValueError:
                 logger.error("Please enter a valid number of nodes (>= 1)")
                 continue
-
+            
+            # Ask about gradient compression
+            use_compression = get_user_input("Enable gradient compression? (y/n): ")
+            
             # Run training session
-            success = run_training_session(num_nodes)
+            success = run_training_session(num_nodes, use_compression)
             
             # Ask to run again
             logger.info("\nWould you like to run another training session?")
             if not get_user_input("Run again? (y/n): "):
                 logger.info("Exiting...")
-                return 0  # Exit cleanly when user enters 'n'
+                cleanup_ports()
+                os._exit(0)  # Force exit to ensure all threads are stopped
 
     except KeyboardInterrupt:
         logger.info("\nExiting...")
-        return 0
+        cleanup_ports()
+        os._exit(0)
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
-        return 1
+        cleanup_ports()
+        os._exit(1)
 
 if __name__ == "__main__":
-    exit_code = main()
-    exit(exit_code)  # This will properly terminate the process 
+    main() 
