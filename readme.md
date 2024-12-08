@@ -29,6 +29,8 @@ cd wiiiiide
 pip install -r requirements.txt
 ```
 
+More detailed instructions can be found in the [setup guide](docs/setup.md).
+
 ## Using WIIIIIDE: It's Incredibly Simple
 
 WIIIIIDE is designed to be straightforward to use. Here's a few examples to get you started:
