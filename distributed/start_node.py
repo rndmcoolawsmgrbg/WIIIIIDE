@@ -19,12 +19,12 @@ class GracefulKiller:
         logger.info("Received shutdown signal...")
         self.kill_now = True
 
-async def run_node(node_id: str, registry: str, port: int, killer: GracefulKiller):
+async def run_node(node_id: str, registry: str, port: int, external_port: Optional[int], killer: GracefulKiller):
     """Run the node service."""
     node = None
     try:
         # Initialize node service
-        node = NodeService(node_id, registry, port)
+        node = NodeService(node_id, registry, port, external_port)
         logger.info(f"Starting node {node_id}")
         
         # Run node until shutdown signal
@@ -34,9 +34,8 @@ async def run_node(node_id: str, registry: str, port: int, killer: GracefulKille
         logger.error(f"Error: {e}")
     finally:
         if node:
-            # Ensure node is stopped
             node.running = False
-            await asyncio.sleep(0.5)  # Give time for cleanup
+            await asyncio.sleep(0.5)
         logger.info("Node shutdown complete")
 
 async def shutdown(signal, loop):
@@ -56,7 +55,7 @@ def main():
     parser.add_argument('--node-id', required=True, help='Unique identifier for this node')
     parser.add_argument('--registry', required=True, help='Registry server address')
     parser.add_argument('--port', type=int, default=5555, help='Port to listen for jobs')
-    parser.add_argument('--external-port', type=int, help='External port if behind NAT')
+    parser.add_argument('--external-port', type=int, help='External port if different from listen port')
     
     args = parser.parse_args()
     
@@ -75,7 +74,7 @@ def main():
     
     try:
         loop.run_until_complete(
-            run_node(args.node_id, args.registry, args.port, killer)
+            run_node(args.node_id, args.registry, args.port, args.external_port, killer)
         )
     finally:
         loop.close()

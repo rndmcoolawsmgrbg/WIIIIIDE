@@ -11,13 +11,15 @@ import base64
 from models import SimpleModel
 import socket
 import requests
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 class NodeService:
-    def __init__(self, node_id: str, registry_address: str, port: int):
+    def __init__(self, node_id: str, registry_address: str, port: int, external_port: Optional[int] = None):
         self.node_id = node_id
         self.port = port
+        self.external_port = external_port or port  # Port to advertise to other nodes
         self.running = True
         
         # Determine device
@@ -32,41 +34,30 @@ class NodeService:
         
         # Socket for registry communication
         self.registry_socket = self.ctx.socket(zmq.REQ)
-        # Remove tcp:// if it's in the address
         if registry_address.startswith('tcp://'):
             registry_address = registry_address[6:]
         self.registry_socket.connect(f"tcp://{registry_address}")
         
-        logger.info(f"Node {node_id} initialized (device: {self.device})")
+        # Get local IP
+        self.ip_address = self._get_ip_address()
+        logger.info(f"Node {node_id} initialized on {self.ip_address}:{self.external_port} (device: {self.device})")
         
         self.current_job = None
         self.current_model = None
         self.optimizer = None
         
-        # Get external IP
-        self.ip_address = self._get_ip_address()
-        logger.info(f"Node external IP: {self.ip_address}")
-        
     def _get_ip_address(self) -> str:
-        """Get node's external IP address."""
+        """Get node's local network IP address."""
         try:
-            # First try to get external IP
-            response = requests.get('https://api.ipify.org')
-            if response.status_code == 200:
-                return response.text
-        except:
-            pass
-            
-        try:
-            # Fallback to getting local network IP
+            # Get local network IP
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # Doesn't actually connect
+            # Using Google's DNS to get local IP (doesn't actually connect)
             s.connect(('8.8.8.8', 80))
             ip = s.getsockname()[0]
             s.close()
             return ip
         except:
-            # Last resort: localhost
+            # Fallback to localhost
             return 'localhost'
             
     async def heartbeat(self):
@@ -76,9 +67,9 @@ class NodeService:
                 msg = {
                     'type': 'node',
                     'id': self.node_id,
-                    'address': f"tcp://{self.ip_address}:{self.port}",
+                    'address': f"tcp://{self.ip_address}:{self.external_port}",
                     'device': self.device,
-                    'status': 'idle'
+                    'status': 'idle' if not self.current_job else 'busy'
                 }
                 await self.registry_socket.send_json(msg)
                 await self.registry_socket.recv_json()
