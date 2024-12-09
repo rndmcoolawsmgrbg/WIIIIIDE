@@ -4,6 +4,7 @@ import signal
 import sys
 from node_service import NodeService
 import argparse
+from typing import Optional
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ def main():
     parser.add_argument('--node-id', required=True, help='Unique identifier for this node')
     parser.add_argument('--registry', required=True, help='Registry server address')
     parser.add_argument('--port', type=int, default=5555, help='Port to listen for jobs')
+    parser.add_argument('--external-port', type=int, help='External port if behind NAT')
     
     args = parser.parse_args()
     

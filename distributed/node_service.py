@@ -9,6 +9,8 @@ from torch.utils.data import DataLoader
 import pickle
 import base64
 from models import SimpleModel
+import socket
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,32 @@ class NodeService:
         self.current_model = None
         self.optimizer = None
         
+        # Get external IP
+        self.ip_address = self._get_ip_address()
+        logger.info(f"Node external IP: {self.ip_address}")
+        
+    def _get_ip_address(self) -> str:
+        """Get node's external IP address."""
+        try:
+            # First try to get external IP
+            response = requests.get('https://api.ipify.org')
+            if response.status_code == 200:
+                return response.text
+        except:
+            pass
+            
+        try:
+            # Fallback to getting local network IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # Doesn't actually connect
+            s.connect(('8.8.8.8', 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except:
+            # Last resort: localhost
+            return 'localhost'
+            
     async def heartbeat(self):
         """Send periodic heartbeats to registry."""
         while self.running:
@@ -48,7 +76,7 @@ class NodeService:
                 msg = {
                     'type': 'node',
                     'id': self.node_id,
-                    'address': f"tcp://localhost:{self.port}",
+                    'address': f"tcp://{self.ip_address}:{self.port}",
                     'device': self.device,
                     'status': 'idle'
                 }
