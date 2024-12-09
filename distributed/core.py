@@ -79,12 +79,11 @@ class DistributedServer:
         model: nn.Module,
         optimizer: torch.optim.Optimizer,
         port: int = 5555,
-        world_size: int = 2
+        dynamic_workers: bool = True
     ):
         self.model = model
         self.optimizer = optimizer
         self.port = port
-        self.world_size = world_size
         self.running = True
         
         # Network setup
@@ -96,8 +95,8 @@ class DistributedServer:
         self.gradient_accumulator = {}
         self.batch_counter = 0
         self.gradient_lock = asyncio.Lock()
-        self.message_queues = {}
-        self.connected_workers = set()
+        self.active_workers = set()
+        self.batch_workers = {}  # Track workers per batch
         
     def _get_worker_name(self, worker_id: bytes) -> str:
         """Convert worker ID bytes to readable name."""
@@ -115,11 +114,16 @@ class DistributedServer:
         logger.info(f"Model sent to {worker_name}")
         
     async def handle_gradients(self, worker_id: bytes, batch_id: int):
-        """Handle incoming gradients."""
+        """Handle incoming gradients with dynamic worker support."""
         worker_name = self._get_worker_name(worker_id)
         async with self.gradient_lock:
             if batch_id not in self.gradient_accumulator:
                 self.gradient_accumulator[batch_id] = []
+                self.batch_workers[batch_id] = set()
+                
+            if worker_id in self.batch_workers[batch_id]:
+                logger.warning(f"Duplicate gradient from {worker_name} for batch {batch_id}")
+                return
                 
             grads = []
             for param in self.model.parameters():
@@ -127,9 +131,11 @@ class DistributedServer:
                 grads.append(grad)
                 
             self.gradient_accumulator[batch_id].append(grads)
+            self.batch_workers[batch_id].add(worker_id)
             logger.info(f"Received gradients from {worker_name} for batch {batch_id}")
             
-            if len(self.gradient_accumulator[batch_id]) == self.world_size:
+            # Update model if we have enough gradients (at least 2 workers)
+            if len(self.gradient_accumulator[batch_id]) >= 2:
                 await self._update_model(batch_id)
                 
     async def _update_model(self, batch_id: int):
@@ -161,7 +167,7 @@ class DistributedServer:
             logger.error(f"Error updating model: {e}")
             
     async def message_handler(self):
-        """Central message handling loop."""
+        """Central message handling loop with dynamic worker support."""
         while self.running:
             try:
                 msg = await self.socket.recv_multipart()
@@ -169,10 +175,16 @@ class DistributedServer:
                 worker_name = self._get_worker_name(worker_id)
                 
                 if command == b'hello':
-                    if worker_id not in self.connected_workers:
+                    if worker_id not in self.active_workers:
                         logger.info(f"New worker connected: {worker_name}")
-                        self.connected_workers.add(worker_id)
+                        self.active_workers.add(worker_id)
                         await self.socket.send_multipart([worker_id, b'welcome'])
+                        logger.info(f"Active workers: {len(self.active_workers)}")
+                        
+                elif command == b'goodbye':
+                    if worker_id in self.active_workers:
+                        logger.info(f"Worker disconnected: {worker_name}")
+                        self.active_workers.remove(worker_id)
                         
                 elif command == b'get_model':
                     await self.handle_model_request(worker_id)
