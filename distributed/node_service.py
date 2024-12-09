@@ -12,6 +12,7 @@ from models import SimpleModel
 import socket
 import requests
 from typing import Optional
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -89,21 +90,42 @@ class NodeService:
             # Create model instance
             self.current_model = model_class(**model_args).to(self.device)
             
-            # Setup optimizer
-            self.optimizer = torch.optim.Adam(
-                self.current_model.parameters(), 
-                lr=training_args['learning_rate']
-            )
-            
-            # Create synthetic dataset for testing
-            dataset = torch.randn(1000, model_args['input_size'])
-            labels = torch.randint(0, model_args['output_size'], (1000,))
+            # Create more challenging synthetic dataset
+            num_samples = 10000
+            dataset = torch.randn(num_samples, model_args['input_size'])
+            # Create patterns in the data
+            for i in range(num_samples):
+                if i % 2 == 0:
+                    dataset[i, :100] *= 2  # Amplify first 100 features
+                else:
+                    dataset[i, -100:] *= 2  # Amplify last 100 features
+            labels = torch.randint(0, model_args['output_size'], (num_samples,))
             
             # Training loop
             batch_size = training_args['batch_size']
             num_epochs = training_args['num_epochs']
             
+            # Add L2 regularization
+            self.optimizer = torch.optim.Adam(
+                self.current_model.parameters(), 
+                lr=training_args['learning_rate'],
+                weight_decay=training_args.get('weight_decay', 0.01)
+            )
+            
+            # Learning rate scheduler
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer, 
+                mode='min', 
+                factor=0.5, 
+                patience=2,
+                verbose=True
+            )
+            
+            best_loss = float('inf')
+            patience_counter = 0
+            
             for epoch in range(num_epochs):
+                self.current_model.train()
                 total_loss = 0
                 num_batches = 0
                 
@@ -119,11 +141,15 @@ class NodeService:
                     
                     # Forward pass
                     outputs = self.current_model(batch_data)
-                    loss = nn.functional.cross_entropy(outputs, batch_labels)
+                    loss = F.cross_entropy(outputs, batch_labels)
                     
                     # Backward pass
                     self.optimizer.zero_grad()
                     loss.backward()
+                    
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(self.current_model.parameters(), max_norm=1.0)
+                    
                     self.optimizer.step()
                     
                     total_loss += loss.item()
@@ -132,11 +158,28 @@ class NodeService:
                     # Log progress
                     if num_batches % 10 == 0:
                         logger.info(f"Epoch {epoch}, Batch {num_batches}, Loss: {loss.item():.4f}")
-                        
+                
                 avg_loss = total_loss / num_batches
                 logger.info(f"Epoch {epoch} completed. Average loss: {avg_loss:.4f}")
                 
-            return {'status': 'completed', 'final_loss': avg_loss}
+                # Update learning rate
+                scheduler.step(avg_loss)
+                
+                # Early stopping
+                if avg_loss < best_loss:
+                    best_loss = avg_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= 5:  # 5 epochs without improvement
+                        logger.info("Early stopping triggered")
+                        break
+                
+            return {
+                'status': 'completed', 
+                'final_loss': avg_loss,
+                'best_loss': best_loss
+            }
             
         except Exception as e:
             logger.error(f"Training error: {e}")

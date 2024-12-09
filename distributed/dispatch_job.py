@@ -88,13 +88,15 @@ async def main():
         'model_class': SimpleModel,
         'model_args': {
             'input_size': 784,
-            'hidden_size': 128,
-            'output_size': 10
+            'hidden_sizes': [512, 256, 128],
+            'output_size': 10,
+            'dropout_rate': 0.3
         },
         'training_args': {
-            'batch_size': 32,
+            'batch_size': 64,
             'learning_rate': 0.001,
-            'num_epochs': 10
+            'num_epochs': 20,
+            'weight_decay': 0.01  # L2 regularization
         }
     }
     
